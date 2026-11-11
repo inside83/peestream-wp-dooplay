@@ -47,6 +47,7 @@ final class PeeStream_Plugin {
 	private function init_hooks() {
 		add_action( 'init', array( $this, 'load_textdomain' ) );
 		add_action( 'init', array( __CLASS__, 'check_db_upgrade' ) );
+		add_action( 'init', array( __CLASS__, 'ensure_cron_scheduled' ) );
 		add_filter( 'cron_schedules', array( __CLASS__, 'add_cron_schedules' ) );
 		
 		// Initialize REST API Webhook receiver and Universal Shortcode
@@ -77,11 +78,18 @@ final class PeeStream_Plugin {
 		return $schedules;
 	}
 
+	public static function ensure_cron_scheduled() {
+		if ( ! wp_next_scheduled( 'peestream_cron_process_queue' ) ) {
+			wp_schedule_event( time(), 'peestream_two_minutes', 'peestream_cron_process_queue' );
+		}
+	}
+
 	public static function check_db_upgrade() {
 		if ( get_option( 'peestream_db_version' ) !== '1.0.1' ) {
 			self::create_tables();
 			update_option( 'peestream_db_version', '1.0.1' );
 		}
+		self::ensure_cron_scheduled();
 	}
 
 	public static function create_tables() {
@@ -141,12 +149,19 @@ final class PeeStream_Plugin {
 			original_repeatable longtext,
 			migrated_url varchar(500) NOT NULL DEFAULT '',
 			new_code varchar(64) NOT NULL DEFAULT '',
+			mode varchar(20) NOT NULL DEFAULT 'replace',
 			backup_time datetime NOT NULL,
 			status varchar(32) NOT NULL DEFAULT 'completed',
 			PRIMARY KEY  (id),
 			KEY idx_post_id (post_id)
 		) {$charset_collate};";
 		dbDelta( $sql_backups );
+
+		// Schema migration: ensure mode column exists in existing backups table
+		$has_mode_col = $wpdb->get_results( "SHOW COLUMNS FROM `{$table_backups}` LIKE 'mode'" );
+		if ( empty( $has_mode_col ) ) {
+			$wpdb->query( "ALTER TABLE `{$table_backups}` ADD COLUMN `mode` varchar(20) NOT NULL DEFAULT 'replace' AFTER `new_code`" );
+		}
 	}
 
 	public static function activate() {

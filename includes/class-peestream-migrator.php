@@ -598,6 +598,7 @@ class PeeStream_Migrator {
 								'original_repeatable' => maybe_serialize( $snapshot_meta ),
 								'migrated_url'        => $url,
 								'new_code'            => $filecode,
+								'mode'                => $mode,
 								'backup_time'         => current_time( 'mysql' ),
 								'status'              => 'completed',
 							)
@@ -697,14 +698,19 @@ class PeeStream_Migrator {
 				foreach ( $result as $item ) {
 					if ( is_array( $item ) ) {
 						$fc = isset( $item['filecode'] ) ? $item['filecode'] : ( isset( $item['file_code'] ) ? $item['file_code'] : '' );
-						if ( $fc === $filecode || empty( $fc ) ) {
+						if ( $fc === $filecode ) {
 							return $item;
 						}
 					}
 				}
-				return $result[0];
+				return false;
 			}
-			return $result;
+			// Single object associative array
+			$fc = isset( $result['filecode'] ) ? $result['filecode'] : ( isset( $result['file_code'] ) ? $result['file_code'] : '' );
+			if ( $fc === $filecode ) {
+				return $result;
+			}
+			return false;
 		}
 
 		return false;
@@ -753,6 +759,13 @@ class PeeStream_Migrator {
 			$quality     = ! empty( $item['quality'] ) ? $item['quality'] : '1080p';
 			$retry_count = isset( $item['retry_count'] ) ? (int) $item['retry_count'] : 0;
 
+			// Row-level atomic claim so another worker doesn't process concurrently
+			$claimed = $wpdb->query( $wpdb->prepare(
+				"UPDATE {$table_queue} SET status = 'checking', updated_at = %s WHERE id = %d AND status IN ('pending', 'queued', 'checking')",
+				current_time( 'mysql' ),
+				(int) $item['id']
+			) );
+
 			// Bounded retry & timeout safeguard (max 20 retries or older than 24 hours)
 			$created_time = ! empty( $item['created_at'] ) ? strtotime( $item['created_at'] ) : 0;
 			if ( $retry_count >= 20 || ( $created_time > 0 && ( time() - $created_time ) > 86400 ) ) {
@@ -775,6 +788,7 @@ class PeeStream_Migrator {
 				$wpdb->update(
 					$table_queue,
 					array(
+						'status'      => 'pending',
 						'retry_count' => $retry_count + 1,
 						'updated_at'  => current_time( 'mysql' ),
 					),
@@ -805,25 +819,13 @@ class PeeStream_Migrator {
 				}
 
 				if ( ! $already_present ) {
-					// Save pre-modification backup snapshot
-					$wpdb->insert(
-						$table_backups,
-						array(
-							'post_id'             => $p_id,
-							'original_repeatable' => maybe_serialize( $meta ),
-							'migrated_url'        => $orig_url,
-							'new_code'            => $filecode,
-							'backup_time'         => current_time( 'mysql' ),
-							'status'              => 'completed',
-						)
-					);
+					$snapshot_meta = $meta;
 
 					if ( 'replace' === $mode ) {
-						// Surgical in-place replacement of the matched hoster server
+						// Surgical in-place replacement of the STRICT original URL only (no loose hostname matching)
 						$replaced = false;
-						$orig_host = parse_url( $orig_url, PHP_URL_HOST );
 						foreach ( $meta as &$srv ) {
-							if ( isset( $srv['url'] ) && ( $srv['url'] === $orig_url || ( ! empty( $orig_host ) && strpos( $srv['url'], $orig_host ) !== false ) ) ) {
+							if ( isset( $srv['url'] ) && trim( $srv['url'] ) === $orig_url ) {
 								$srv['url']    = $new_url;
 								$srv['name']   = $srv_name;
 								$srv['select'] = 'iframe';
@@ -836,17 +838,53 @@ class PeeStream_Migrator {
 						unset( $srv );
 
 						if ( ! $replaced ) {
-							// If target hoster server was deleted in the interim, append safely
-							$meta[] = array(
-								'name'    => $srv_name,
-								'select'  => 'iframe',
-								'idioma'  => $language,
-								'quality' => $quality,
-								'url'     => $new_url,
+							// Conflict! Original server was removed or modified by editor in interim.
+							// Do NOT add a new server automatically. Flag conflict.
+							$wpdb->update(
+								$table_queue,
+								array(
+									'state'      => 'conflict',
+									'status'     => 'conflict',
+									'error_msg'  => 'Original server URL modified or deleted by editor in interim. Replacement aborted.',
+									'updated_at' => current_time( 'mysql' ),
+								),
+								array( 'id' => (int) $item['id'] )
 							);
+							$logs[] = sprintf( '[CONFLICT] Post #%d: Target server (%s) was changed or deleted by editor. Automatic replacement aborted.', $p_id, esc_html( $orig_url ) );
+							continue;
 						}
+
+						// Save pre-modification backup snapshot with mode
+						$wpdb->insert(
+							$table_backups,
+							array(
+								'post_id'             => $p_id,
+								'original_repeatable' => maybe_serialize( $snapshot_meta ),
+								'migrated_url'        => $orig_url,
+								'new_code'            => $filecode,
+								'mode'                => 'replace',
+								'backup_time'         => current_time( 'mysql' ),
+								'status'              => 'completed',
+							)
+						);
+
+						update_post_meta( $p_id, 'repeatable_fields', array_values( $meta ) );
 					} else {
 						// Primary strategy: Prepend to the top of the DooPlay player list
+						// Save pre-modification backup snapshot with mode
+						$wpdb->insert(
+							$table_backups,
+							array(
+								'post_id'             => $p_id,
+								'original_repeatable' => maybe_serialize( $snapshot_meta ),
+								'migrated_url'        => $orig_url,
+								'new_code'            => $filecode,
+								'mode'                => 'primary',
+								'backup_time'         => current_time( 'mysql' ),
+								'status'              => 'completed',
+							)
+						);
+
 						array_unshift( $meta, array(
 							'name'    => $srv_name,
 							'select'  => 'iframe',
@@ -854,9 +892,9 @@ class PeeStream_Migrator {
 							'quality' => $quality,
 							'url'     => $new_url,
 						) );
-					}
 
-					update_post_meta( $p_id, 'repeatable_fields', array_values( $meta ) );
+						update_post_meta( $p_id, 'repeatable_fields', array_values( $meta ) );
+					}
 				}
 
 				$wpdb->update(
@@ -889,6 +927,7 @@ class PeeStream_Migrator {
 					$table_queue,
 					array(
 						'state'       => $cur_state,
+						'status'      => 'pending',
 						'retry_count' => $retry_count + 1,
 						'updated_at'  => current_time( 'mysql' ),
 					),
@@ -904,6 +943,26 @@ class PeeStream_Migrator {
 		);
 	}
 
+	private static $lock_key = 'peestream_queue_processing_lock';
+
+	/**
+	 * Acquire shared concurrency lock for queue processing
+	 */
+	public static function acquire_lock() {
+		if ( get_transient( self::$lock_key ) ) {
+			return false;
+		}
+		set_transient( self::$lock_key, time(), 120 );
+		return true;
+	}
+
+	/**
+	 * Release shared concurrency lock
+	 */
+	public static function release_lock() {
+		delete_transient( self::$lock_key );
+	}
+
 	/**
 	 * AJAX endpoint to poll pending queue items
 	 */
@@ -914,29 +973,46 @@ class PeeStream_Migrator {
 			wp_send_json_error( array( 'message' => __( 'Permission denied.', 'peestream-wp-dooplay' ) ) );
 		}
 
-		$res = $this->process_queue_batch( 25 );
-		wp_send_json_success( $res );
+		if ( ! self::acquire_lock() ) {
+			wp_send_json_success( array(
+				'checked_count' => 0,
+				'ready_count'   => 0,
+				'logs'          => array( __( 'Queue processor is currently busy in background. Please wait a moment and retry.', 'peestream-wp-dooplay' ) ),
+				'locked'        => true,
+			) );
+			return;
+		}
+
+		try {
+			$res = $this->process_queue_batch( 25 );
+			wp_send_json_success( $res );
+		} finally {
+			self::release_lock();
+		}
 	}
 
 	/**
 	 * Automated WP-Cron processor with transient concurrency lock
 	 */
 	public static function cron_check_queue() {
-		if ( get_transient( 'peestream_queue_cron_lock' ) ) {
+		if ( ! self::acquire_lock() ) {
 			return;
 		}
-		set_transient( 'peestream_queue_cron_lock', 1, 120 );
 
-		$migrator = new self();
-		$migrator->process_queue_batch( 20 );
-
-		delete_transient( 'peestream_queue_cron_lock' );
+		try {
+			$migrator = new self();
+			$migrator->process_queue_batch( 20 );
+		} finally {
+			self::release_lock();
+		}
 	}
 
 	/**
 	 * Surgical rollback of migrated posts
-	 * Reverts only the PeeStream server back to the original hoster link,
-	 * ensuring newer editorial modifications and server additions are preserved.
+	 * Differentiates primary vs replace:
+	 * - Primary: Removes only the PeeStream server; does not touch or duplicate original server.
+	 * - Replace: Restores the complete original server item (name, select, idioma, quality, url).
+	 * Preserves all subsequent editorial additions and modifications.
 	 */
 	public function ajax_rollback() {
 		check_ajax_referer( 'peestream_migrator_nonce', 'nonce' );
@@ -973,6 +1049,7 @@ class PeeStream_Migrator {
 			$post_id  = (int) $b['post_id'];
 			$orig_url = trim( (string) $b['migrated_url'] );
 			$new_code = trim( (string) $b['new_code'] );
+			$mode     = ! empty( $b['mode'] ) ? trim( (string) $b['mode'] ) : '';
 
 			$current_meta = get_post_meta( $post_id, 'repeatable_fields', true );
 			if ( is_string( $current_meta ) ) {
@@ -982,19 +1059,53 @@ class PeeStream_Migrator {
 				$current_meta = array();
 			}
 
+			$orig_repeatable = maybe_unserialize( $b['original_repeatable'] );
+			if ( ! is_array( $orig_repeatable ) ) {
+				$orig_repeatable = array();
+			}
+
+			// If mode was not explicitly stored, detect strategy:
+			// If the original URL is still present in current servers, it was a primary prepend!
+			if ( empty( $mode ) ) {
+				$orig_still_present = false;
+				foreach ( $current_meta as $cs ) {
+					if ( isset( $cs['url'] ) && trim( $cs['url'] ) === $orig_url ) {
+						$orig_still_present = true;
+						break;
+					}
+				}
+				$mode = $orig_still_present ? 'primary' : 'replace';
+			}
+
 			// Surgical rollback: do NOT overwrite entire repeatable_fields with old snapshot!
 			// Check if current post still contains this PeeStream replacement
 			$modified = false;
 			foreach ( $current_meta as $idx => &$srv ) {
 				if ( isset( $srv['url'] ) && ( strpos( $srv['url'], '/e/' . $new_code ) !== false || $srv['url'] === $new_code ) ) {
-					if ( ! empty( $orig_url ) ) {
-						// Revert only the PeeStream URL back to the original hoster URL
-						$srv['url'] = $orig_url;
-					} else {
-						// Primary prepend mode: remove this server entry safely
+					if ( 'primary' === $mode ) {
+						// Primary prepend mode: remove ONLY the PeeStream server entry.
+						// DO NOT restore original link in its place because the original server already exists!
 						unset( $current_meta[ $idx ] );
+						$modified = true;
+						break;
+					} else {
+						// Replace mode: restore the complete original server item (name, select, idioma, quality, url).
+						$restored_original_item = null;
+						foreach ( $orig_repeatable as $orig_item ) {
+							if ( isset( $orig_item['url'] ) && trim( $orig_item['url'] ) === $orig_url ) {
+								$restored_original_item = $orig_item;
+								break;
+							}
+						}
+
+						if ( $restored_original_item ) {
+							$srv = $restored_original_item;
+						} else {
+							$srv['url'] = $orig_url;
+						}
+						$modified = true;
+						break;
 					}
-					$modified = true;
 				}
 			}
 			unset( $srv );
@@ -1002,7 +1113,7 @@ class PeeStream_Migrator {
 			if ( $modified ) {
 				update_post_meta( $post_id, 'repeatable_fields', array_values( $current_meta ) );
 				$restored_count++;
-				$logs[] = sprintf( '[ROLLBACK] Post #%d: Surgically restored original video server. Editorial additions preserved.', $post_id );
+				$logs[] = sprintf( '[ROLLBACK - %s] Post #%d: Surgically restored server. Editorial additions preserved.', strtoupper( $mode ), $post_id );
 			}
 
 			$wpdb->update(

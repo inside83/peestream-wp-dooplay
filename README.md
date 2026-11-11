@@ -90,6 +90,14 @@ array(
 ## Changelog
 
 ### Version 1.0.1
+- **Server Integrity & Strict Matching:** `replace` migration strictly matches identical original server URLs, eliminating loose hostname matching to protect posts containing multiple servers from the same hoster.
+- **Editorial Conflict Detection:** Automatic conflict detection flags queue items if the target server was modified or deleted by an editor during encoding, preventing accidental server overwrites or unwarranted appends.
+- **Differentiated Surgical Rollback:** Rollback engine distinguishes `primary` (removes only the prepended PeeStream server without duplicating original server) from `replace` (restores complete original server entry including name, player type, audio language, quality, and URL), fully preserving newer editorial modifications.
+- **Atomic Webhook Idempotency:** Webhook receiver atomically pre-reserves incoming `(file_code, event)` records with status `processing` prior to modifying posts or inserting drafts, neutralizing concurrent race conditions.
+- **Strict Disambiguation & DISTINCT Queries:** TV show, episode, and movie matching queries utilize `DISTINCT` post IDs, eliminating false ambiguity caused by multiple postmeta entries for the same ID.
+- **Strict API Parsing:** `/api/file/info` parser enforces strict `filecode` matching without loose fallbacks.
+- **Unified Concurrency Locking:** Manual AJAX checks and automated WP-Cron share a unified lock (`acquire_lock` / `release_lock`) and row-level atomic state claiming (`status = 'checking'`) to prevent parallel duplicate queue runs.
+- **Resilient Scheduling:** Automated WP-Cron registration verified on both plugin activation and runtime `init` / upgrade hooks.
 - **Security & Webhook Disambiguation:** Hardened REST API webhook with POST-only restriction, fail-closed secret authentication (>= 16 chars), IP rate-limiting, and atomic replay protection with `UNIQUE KEY uq_fc_event (file_code, event)`.
 - **Security:** Strict ambiguity detection for duplicate IMDb/TMDb IDs and duplicate season/episode entries across different shows, rejecting with 409 Conflict for manual review to prevent wrong overwrites.
 - **Security:** Default `auto_create_posts` set to `0` (opt-in only). Unmatched incoming webhook items logged for manual review.
@@ -97,7 +105,6 @@ array(
 - **Reliability & Async Queue:** Persistent migration queue (`wp_peestream_migration_queue`) with status polling (`/api/file/info`). Correctly handles PeeStream array result payload `[ { "filecode": "...", "canplay": 1 } ]`. Competitor links are modified only when `canplay=1`.
 - **Automated Processing:** Automated background queue processing via WP-Cron (`peestream_cron_process_queue`) with transient concurrency locking and bounded retry protection (max 20 retries / 24h timeout).
 - **Strategy Preservation:** Migration queue preserves selected mode (`replace` vs `primary`) along with user-selected server name, audio language, and quality badges.
-- **Surgical Rollback:** Selective and targeted rollback engine restores only the specific PeeStream server back to the original hoster URL, guaranteeing newer editorial modifications and additional servers are completely preserved.
 - **Reliability:** Dry-run simulation mode for migrator.
 - **Compatibility:** Strict host validation against confirmed PeeStream hosters (Streamtape, MixDrop, VOE, StreamWish, EarnVids/VidHide, PixelDrain). Non-functional hosters removed.
 - **Network:** Replaced all HTTP requests with `wp_safe_remote_get()` and enforced HTTPS API endpoints.

@@ -138,20 +138,32 @@ class PeeStream_Webhook {
 			), 400 );
 		}
 
-		// 3. Replay Protection: Check if this file_code & event has already been processed
-		$existing_record = $wpdb->get_row( $wpdb->prepare(
-			"SELECT id, post_id FROM {$table_webhooks} WHERE file_code = %s AND event = %s AND status = 'processed' LIMIT 1",
+		// 3. Atomic Replay Protection & Event Pre-reservation
+		// Pre-reserve event atomically on UNIQUE KEY uq_fc_event (file_code, event) with status 'processing'
+		$now_date = current_time( 'mysql' );
+		$reserved = $wpdb->query( $wpdb->prepare(
+			"INSERT IGNORE INTO {$table_webhooks} (file_code, event, post_id, ip, received_at, status)
+			 VALUES (%s, %s, 0, %s, %s, 'processing')",
 			$file_code,
-			$event
+			$event,
+			$client_ip,
+			$now_date
 		) );
 
-		if ( $existing_record ) {
+		if ( ! $reserved ) {
+			// Row already exists! Either previously processed or concurrently processing
+			$existing_record = $wpdb->get_row( $wpdb->prepare(
+				"SELECT id, post_id, status FROM {$table_webhooks} WHERE file_code = %s AND event = %s LIMIT 1",
+				$file_code,
+				$event
+			) );
+
 			return new WP_REST_Response( array(
 				'success'   => true,
 				'action'    => 'replay_ignored',
-				'post_id'   => (int) $existing_record->post_id,
+				'post_id'   => $existing_record ? (int) $existing_record->post_id : 0,
 				'file_code' => $file_code,
-				'message'   => __( 'Duplicate webhook event received. Video already processed.', 'peestream-wp-dooplay' ),
+				'message'   => __( 'Duplicate webhook event received. Video already processed or currently processing.', 'peestream-wp-dooplay' ),
 			), 200 );
 		}
 
@@ -205,13 +217,13 @@ class PeeStream_Webhook {
 		$table_webhooks = $wpdb->prefix . 'peestream_webhooks';
 		$now_date = current_time( 'mysql' );
 
-		// 1. Strict Parent TV Show Matching (Must match verified IMDb ID or TMDb ID)
+		// 1. Strict Parent TV Show Matching (Must match verified IMDb ID or TMDb ID with DISTINCT IDs)
 		$parent_show_id = 0;
 		$matching_shows = array();
 
 		if ( ! empty( $imdb_id ) ) {
 			$matching_shows = $wpdb->get_col( $wpdb->prepare(
-				"SELECT p.ID FROM {$wpdb->posts} p
+				"SELECT DISTINCT p.ID FROM {$wpdb->posts} p
 				 INNER JOIN {$wpdb->postmeta} pm ON (p.ID = pm.post_id AND (pm.meta_key = 'ids' OR pm.meta_key = 'imdb_id'))
 				 WHERE p.post_type = 'tvshows' AND pm.meta_value = %s",
 				$imdb_id
@@ -220,15 +232,22 @@ class PeeStream_Webhook {
 
 		if ( empty( $matching_shows ) && $tmdb_id > 0 ) {
 			$matching_shows = $wpdb->get_col( $wpdb->prepare(
-				"SELECT p.ID FROM {$wpdb->posts} p
+				"SELECT DISTINCT p.ID FROM {$wpdb->posts} p
 				 INNER JOIN {$wpdb->postmeta} pm ON (p.ID = pm.post_id AND (pm.meta_key = 'id' OR pm.meta_key = 'tmdb_id'))
 				 WHERE p.post_type = 'tvshows' AND pm.meta_value = %d",
 				$tmdb_id
 			) );
 		}
 
-		// Ambiguity check for parent TV shows: multiple shows sharing the same ID must NOT be updated
+		$matching_shows = array_values( array_unique( array_map( 'intval', (array) $matching_shows ) ) );
+
+		// Ambiguity check for parent TV shows: multiple distinct shows sharing the same ID must NOT be updated
 		if ( count( $matching_shows ) > 1 ) {
+			$wpdb->update(
+				$table_webhooks,
+				array( 'status' => 'ambiguous', 'received_at' => $now_date ),
+				array( 'file_code' => $file_code, 'event' => $event )
+			);
 			return new WP_REST_Response( array(
 				'success' => false,
 				'action'  => 'ambiguous_match',
@@ -245,7 +264,7 @@ class PeeStream_Webhook {
 
 			// In DooPlay, episodes link to parent show via postmeta 'serie' (show title or show ID)
 			$query = "
-				SELECT p.ID FROM {$wpdb->posts} p
+				SELECT DISTINCT p.ID FROM {$wpdb->posts} p
 				INNER JOIN {$wpdb->postmeta} pm_s ON (p.ID = pm_s.post_id AND pm_s.meta_key = 'temporada' AND pm_s.meta_value = %d)
 				INNER JOIN {$wpdb->postmeta} pm_e ON (p.ID = pm_e.post_id AND pm_e.meta_key = 'episodio' AND pm_e.meta_value = %d)
 				INNER JOIN {$wpdb->postmeta} pm_p ON (p.ID = pm_p.post_id AND pm_p.meta_key = 'serie' AND (pm_p.meta_value = %s OR pm_p.meta_value = %s))
@@ -253,8 +272,14 @@ class PeeStream_Webhook {
 			";
 
 			$matching_eps = $wpdb->get_col( $wpdb->prepare( $query, $season, $episode, $show_name, (string) $parent_show_id ) );
+			$matching_eps = array_values( array_unique( array_map( 'intval', (array) $matching_eps ) ) );
 
 			if ( count( $matching_eps ) > 1 ) {
+				$wpdb->update(
+					$table_webhooks,
+					array( 'status' => 'ambiguous', 'received_at' => $now_date ),
+					array( 'file_code' => $file_code, 'event' => $event )
+				);
 				return new WP_REST_Response( array(
 					'success' => false,
 					'action'  => 'ambiguous_match',
@@ -269,17 +294,19 @@ class PeeStream_Webhook {
 		if ( $matched_ep_id > 0 ) {
 			$this->attach_server_to_post( $matched_ep_id, $server_entry, $file_code, $embed_url );
 
-			$wpdb->query( $wpdb->prepare(
-				"INSERT INTO {$table_webhooks} (file_code, event, post_id, ip, received_at, status)
-				 VALUES (%s, %s, %d, %s, %s, %s)
-				 ON DUPLICATE KEY UPDATE post_id = VALUES(post_id), ip = VALUES(ip), received_at = VALUES(received_at), status = VALUES(status)",
-				$file_code,
-				$event,
-				$matched_ep_id,
-				$client_ip,
-				$now_date,
-				'processed'
-			) );
+			$wpdb->update(
+				$table_webhooks,
+				array(
+					'post_id'     => $matched_ep_id,
+					'ip'          => $client_ip,
+					'received_at' => $now_date,
+					'status'      => 'processed',
+				),
+				array(
+					'file_code' => $file_code,
+					'event'     => $event,
+				)
+			);
 
 			return new WP_REST_Response( array(
 				'success'   => true,
@@ -305,6 +332,11 @@ class PeeStream_Webhook {
 			) );
 
 			if ( is_wp_error( $new_post_id ) ) {
+				$wpdb->update(
+					$table_webhooks,
+					array( 'status' => 'failed', 'received_at' => $now_date ),
+					array( 'file_code' => $file_code, 'event' => $event )
+				);
 				return new WP_REST_Response( array( 'success' => false, 'error' => $new_post_id->get_error_message() ), 500 );
 			}
 
@@ -321,17 +353,19 @@ class PeeStream_Webhook {
 
 			$this->attach_server_to_post( $new_post_id, $server_entry, $file_code, $embed_url );
 
-			$wpdb->query( $wpdb->prepare(
-				"INSERT INTO {$table_webhooks} (file_code, event, post_id, ip, received_at, status)
-				 VALUES (%s, %s, %d, %s, %s, %s)
-				 ON DUPLICATE KEY UPDATE post_id = VALUES(post_id), ip = VALUES(ip), received_at = VALUES(received_at), status = VALUES(status)",
-				$file_code,
-				$event,
-				$new_post_id,
-				$client_ip,
-				$now_date,
-				'processed'
-			) );
+			$wpdb->update(
+				$table_webhooks,
+				array(
+					'post_id'     => $new_post_id,
+					'ip'          => $client_ip,
+					'received_at' => $now_date,
+					'status'      => 'processed',
+				),
+				array(
+					'file_code' => $file_code,
+					'event'     => $event,
+				)
+			);
 
 			return new WP_REST_Response( array(
 				'success'   => true,
@@ -343,17 +377,19 @@ class PeeStream_Webhook {
 		}
 
 		// C. Ambiguous / Unmatched: Audit and leave untouched
-		$wpdb->query( $wpdb->prepare(
-			"INSERT INTO {$table_webhooks} (file_code, event, post_id, ip, received_at, status)
-			 VALUES (%s, %s, %d, %s, %s, %s)
-			 ON DUPLICATE KEY UPDATE post_id = VALUES(post_id), ip = VALUES(ip), received_at = VALUES(received_at), status = VALUES(status)",
-			$file_code,
-			$event,
-			0,
-			$client_ip,
-			$now_date,
-			'unmatched'
-		) );
+		$wpdb->update(
+			$table_webhooks,
+			array(
+				'post_id'     => 0,
+				'ip'          => $client_ip,
+				'received_at' => $now_date,
+				'status'      => 'unmatched',
+			),
+			array(
+				'file_code' => $file_code,
+				'event'     => $event,
+			)
+		);
 
 		return new WP_REST_Response( array(
 			'success'   => true,
@@ -371,28 +407,35 @@ class PeeStream_Webhook {
 		$matched_post_id = 0;
 		$matching_movies = array();
 
-		// 1. Strict IMDb Match
+		// 1. Strict IMDb Match with DISTINCT post IDs
 		if ( ! empty( $imdb_id ) ) {
 			$matching_movies = $wpdb->get_col( $wpdb->prepare(
-				"SELECT p.ID FROM {$wpdb->posts} p
+				"SELECT DISTINCT p.ID FROM {$wpdb->posts} p
 				 INNER JOIN {$wpdb->postmeta} pm ON (p.ID = pm.post_id AND (pm.meta_key = 'ids' OR pm.meta_key = 'imdb_id'))
 				 WHERE p.post_type IN ('movies', 'post') AND pm.meta_value = %s",
 				$imdb_id
 			) );
 		}
 
-		// 2. Strict TMDb Match
+		// 2. Strict TMDb Match with DISTINCT post IDs
 		if ( empty( $matching_movies ) && $tmdb_id > 0 ) {
 			$matching_movies = $wpdb->get_col( $wpdb->prepare(
-				"SELECT p.ID FROM {$wpdb->posts} p
+				"SELECT DISTINCT p.ID FROM {$wpdb->posts} p
 				 INNER JOIN {$wpdb->postmeta} pm ON (p.ID = pm.post_id AND (pm.meta_key = 'id' OR pm.meta_key = 'tmdb_id'))
 				 WHERE p.post_type IN ('movies', 'post') AND pm.meta_value = %d",
 				$tmdb_id
 			) );
 		}
 
-		// Ambiguity check: if multiple movies share the same IMDb or TMDb identifier, reject with 409
+		$matching_movies = array_values( array_unique( array_map( 'intval', (array) $matching_movies ) ) );
+
+		// Ambiguity check: if multiple distinct movies share the same IMDb or TMDb identifier, reject with 409
 		if ( count( $matching_movies ) > 1 ) {
+			$wpdb->update(
+				$table_webhooks,
+				array( 'status' => 'ambiguous', 'received_at' => $now_date ),
+				array( 'file_code' => $file_code, 'event' => $event )
+			);
 			return new WP_REST_Response( array(
 				'success' => false,
 				'action'  => 'ambiguous_match',
@@ -406,17 +449,19 @@ class PeeStream_Webhook {
 		if ( $matched_post_id > 0 ) {
 			$this->attach_server_to_post( $matched_post_id, $server_entry, $file_code, $embed_url );
 
-			$wpdb->query( $wpdb->prepare(
-				"INSERT INTO {$table_webhooks} (file_code, event, post_id, ip, received_at, status)
-				 VALUES (%s, %s, %d, %s, %s, %s)
-				 ON DUPLICATE KEY UPDATE post_id = VALUES(post_id), ip = VALUES(ip), received_at = VALUES(received_at), status = VALUES(status)",
-				$file_code,
-				$event,
-				$matched_post_id,
-				$client_ip,
-				$now_date,
-				'processed'
-			) );
+			$wpdb->update(
+				$table_webhooks,
+				array(
+					'post_id'     => $matched_post_id,
+					'ip'          => $client_ip,
+					'received_at' => $now_date,
+					'status'      => 'processed',
+				),
+				array(
+					'file_code' => $file_code,
+					'event'     => $event,
+				)
+			);
 
 			return new WP_REST_Response( array(
 				'success'   => true,
@@ -441,6 +486,11 @@ class PeeStream_Webhook {
 			) );
 
 			if ( is_wp_error( $new_post_id ) ) {
+				$wpdb->update(
+					$table_webhooks,
+					array( 'status' => 'failed', 'received_at' => $now_date ),
+					array( 'file_code' => $file_code, 'event' => $event )
+				);
 				return new WP_REST_Response( array( 'success' => false, 'error' => $new_post_id->get_error_message() ), 500 );
 			}
 
@@ -453,17 +503,19 @@ class PeeStream_Webhook {
 
 			$this->attach_server_to_post( $new_post_id, $server_entry, $file_code, $embed_url );
 
-			$wpdb->query( $wpdb->prepare(
-				"INSERT INTO {$table_webhooks} (file_code, event, post_id, ip, received_at, status)
-				 VALUES (%s, %s, %d, %s, %s, %s)
-				 ON DUPLICATE KEY UPDATE post_id = VALUES(post_id), ip = VALUES(ip), received_at = VALUES(received_at), status = VALUES(status)",
-				$file_code,
-				$event,
-				$new_post_id,
-				$client_ip,
-				$now_date,
-				'processed'
-			) );
+			$wpdb->update(
+				$table_webhooks,
+				array(
+					'post_id'     => $new_post_id,
+					'ip'          => $client_ip,
+					'received_at' => $now_date,
+					'status'      => 'processed',
+				),
+				array(
+					'file_code' => $file_code,
+					'event'     => $event,
+				)
+			);
 
 			return new WP_REST_Response( array(
 				'success'   => true,
@@ -475,17 +527,19 @@ class PeeStream_Webhook {
 		}
 
 		// C. Unmatched Movie: Audit and leave untouched
-		$wpdb->query( $wpdb->prepare(
-			"INSERT INTO {$table_webhooks} (file_code, event, post_id, ip, received_at, status)
-			 VALUES (%s, %s, %d, %s, %s, %s)
-			 ON DUPLICATE KEY UPDATE post_id = VALUES(post_id), ip = VALUES(ip), received_at = VALUES(received_at), status = VALUES(status)",
-			$file_code,
-			$event,
-			0,
-			$client_ip,
-			$now_date,
-			'unmatched'
-		) );
+		$wpdb->update(
+			$table_webhooks,
+			array(
+				'post_id'     => 0,
+				'ip'          => $client_ip,
+				'received_at' => $now_date,
+				'status'      => 'unmatched',
+			),
+			array(
+				'file_code' => $file_code,
+				'event'     => $event,
+			)
+		);
 
 		return new WP_REST_Response( array(
 			'success'   => true,
