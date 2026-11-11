@@ -150,21 +150,84 @@ class PeeStream_Webhook {
 			$now_date
 		) );
 
-		if ( ! $reserved ) {
-			// Row already exists! Either previously processed or concurrently processing
+		$has_lock = false;
+		if ( $reserved ) {
+			$has_lock = true;
+		} else {
+			// Row already exists or DB error - inspect current state
 			$existing_record = $wpdb->get_row( $wpdb->prepare(
-				"SELECT id, post_id, status FROM {$table_webhooks} WHERE file_code = %s AND event = %s LIMIT 1",
+				"SELECT id, post_id, status, received_at FROM {$table_webhooks} WHERE file_code = %s AND event = %s LIMIT 1",
 				$file_code,
 				$event
 			) );
 
+			if ( $existing_record ) {
+				$status = $existing_record->status;
+				if ( 'processed' === $status ) {
+					return new WP_REST_Response( array(
+						'success'   => true,
+						'action'    => 'replay_ignored',
+						'post_id'   => (int) $existing_record->post_id,
+						'file_code' => $file_code,
+						'message'   => __( 'Duplicate webhook event received. Video has already been processed.', 'peestream-wp-dooplay' ),
+					), 200 );
+				} elseif ( 'processing' === $status ) {
+					$time_diff = time() - strtotime( $existing_record->received_at );
+					if ( $time_diff < 60 ) {
+						return new WP_REST_Response( array(
+							'success'   => true,
+							'action'    => 'concurrent_ignored',
+							'file_code' => $file_code,
+							'message'   => __( 'Webhook event is currently being processed concurrently. Replay ignored.', 'peestream-wp-dooplay' ),
+						), 200 );
+					}
+					// Timed out processing lock (>60s) - atomic CAS takeover
+					$taken = $wpdb->query( $wpdb->prepare(
+						"UPDATE {$table_webhooks} SET ip = %s, received_at = %s, status = 'processing' WHERE id = %d AND status = 'processing' AND received_at = %s",
+						$client_ip,
+						$now_date,
+						(int) $existing_record->id,
+						$existing_record->received_at
+					) );
+					if ( $taken ) {
+						$has_lock = true;
+					} else {
+						return new WP_REST_Response( array(
+							'success'   => true,
+							'action'    => 'concurrent_ignored',
+							'file_code' => $file_code,
+							'message'   => __( 'Webhook event takeover failed: concurrent worker won race. Replay ignored.', 'peestream-wp-dooplay' ),
+						), 200 );
+					}
+				} elseif ( in_array( $status, array( 'failed', 'unmatched', 'ambiguous' ), true ) ) {
+					// Controlled retry for failed or previously unresolved events with atomic CAS
+					$taken = $wpdb->query( $wpdb->prepare(
+						"UPDATE {$table_webhooks} SET ip = %s, received_at = %s, status = 'processing' WHERE id = %d AND status = %s AND received_at = %s",
+						$client_ip,
+						$now_date,
+						(int) $existing_record->id,
+						$status,
+						$existing_record->received_at
+					) );
+					if ( $taken ) {
+						$has_lock = true;
+					} else {
+						return new WP_REST_Response( array(
+							'success'   => true,
+							'action'    => 'concurrent_ignored',
+							'file_code' => $file_code,
+							'message'   => __( 'Webhook event retry takeover failed: concurrent worker won race. Replay ignored.', 'peestream-wp-dooplay' ),
+						), 200 );
+					}
+				}
+			}
+		}
+
+		if ( ! $has_lock ) {
 			return new WP_REST_Response( array(
-				'success'   => true,
-				'action'    => 'replay_ignored',
-				'post_id'   => $existing_record ? (int) $existing_record->post_id : 0,
-				'file_code' => $file_code,
-				'message'   => __( 'Duplicate webhook event received. Video already processed or currently processing.', 'peestream-wp-dooplay' ),
-			), 200 );
+				'success' => false,
+				'error'   => __( 'Could not acquire lock or reservation for webhook event. Processing aborted.', 'peestream-wp-dooplay' ),
+			), 500 );
 		}
 
 		// 4. Extract identifiers

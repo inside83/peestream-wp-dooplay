@@ -590,8 +590,33 @@ class PeeStream_Migrator {
 					}
 
 					if ( ! $already_present ) {
+						// Verify original URL still exists before proceeding
+						if ( 'replace' !== $mode ) {
+							$orig_exists = false;
+							foreach ( $meta as $check_orig ) {
+								if ( isset( $check_orig['url'] ) && trim( $check_orig['url'] ) === $url ) {
+									$orig_exists = true;
+									break;
+								}
+							}
+							if ( ! $orig_exists ) {
+								$wpdb->update(
+									$table_queue,
+									array(
+										'state'      => 'conflict',
+										'status'     => 'conflict',
+										'error_msg'  => 'Original server URL modified or deleted by editor in interim. Primary insertion aborted.',
+										'updated_at' => current_time( 'mysql' ),
+									),
+									array( 'post_id' => $p_id, 'original_url' => $url )
+								);
+								$logs[] = sprintf( '[CONFLICT] Post #%d: Original server (%s) was changed or deleted by editor. Primary attachment aborted.', $p_id, esc_html( $url ) );
+								continue;
+							}
+						}
+
 						// Create backup snapshot before modifying
-						$wpdb->insert(
+						$ins_b = $wpdb->insert(
 							$table_backups,
 							array(
 								'post_id'             => $p_id,
@@ -603,6 +628,11 @@ class PeeStream_Migrator {
 								'status'              => 'completed',
 							)
 						);
+
+						if ( false === $ins_b || empty( $wpdb->insert_id ) ) {
+							$logs[] = sprintf( '[ERROR] Post #%d: Could not save backup snapshot. Post modification aborted for safety.', $p_id );
+							continue;
+						}
 
 						if ( 'replace' === $mode ) {
 							$srv['url']     = $new_url;
@@ -738,9 +768,14 @@ class PeeStream_Migrator {
 		$table_queue   = $wpdb->prefix . 'peestream_migration_queue';
 		$table_backups = $wpdb->prefix . 'peestream_migration_backups';
 
+		$stale_checking_time = date( 'Y-m-d H:i:s', time() - 300 );
 		$pending_items = $wpdb->get_results(
 			$wpdb->prepare(
-				"SELECT * FROM {$table_queue} WHERE status IN ('pending', 'queued', 'checking') ORDER BY id ASC LIMIT %d",
+				"SELECT * FROM {$table_queue} 
+				 WHERE status IN ('pending', 'queued') 
+				    OR (status = 'checking' AND updated_at < %s) 
+				 ORDER BY id ASC LIMIT %d",
+				$stale_checking_time,
 				max( 1, intval( $limit ) )
 			),
 			ARRAY_A
@@ -761,10 +796,19 @@ class PeeStream_Migrator {
 
 			// Row-level atomic claim so another worker doesn't process concurrently
 			$claimed = $wpdb->query( $wpdb->prepare(
-				"UPDATE {$table_queue} SET status = 'checking', updated_at = %s WHERE id = %d AND status IN ('pending', 'queued', 'checking')",
+				"UPDATE {$table_queue} 
+				 SET status = 'checking', updated_at = %s 
+				 WHERE id = %d 
+				   AND (status IN ('pending', 'queued') OR (status = 'checking' AND updated_at < %s))",
 				current_time( 'mysql' ),
-				(int) $item['id']
+				(int) $item['id'],
+				$stale_checking_time
 			) );
+
+			if ( ! $claimed ) {
+				// Task already claimed by another concurrent worker or state changed
+				continue;
+			}
 
 			// Bounded retry & timeout safeguard (max 20 retries or older than 24 hours)
 			$created_time = ! empty( $item['created_at'] ) ? strtotime( $item['created_at'] ) : 0;
@@ -855,7 +899,7 @@ class PeeStream_Migrator {
 						}
 
 						// Save pre-modification backup snapshot with mode
-						$wpdb->insert(
+						$ins_b = $wpdb->insert(
 							$table_backups,
 							array(
 								'post_id'             => $p_id,
@@ -868,11 +912,40 @@ class PeeStream_Migrator {
 							)
 						);
 
+						if ( false === $ins_b || empty( $wpdb->insert_id ) ) {
+							$logs[] = sprintf( '[ERROR] Post #%d: Could not save backup snapshot. Replace modification aborted.', $p_id );
+							continue;
+						}
+
 						update_post_meta( $p_id, 'repeatable_fields', array_values( $meta ) );
 					} else {
-						// Primary strategy: Prepend to the top of the DooPlay player list
+						// Primary strategy: Verify original server still exists before prepending
+						$orig_still_there = false;
+						foreach ( $meta as $check_s ) {
+							if ( isset( $check_s['url'] ) && trim( $check_s['url'] ) === $orig_url ) {
+								$orig_still_there = true;
+								break;
+							}
+						}
+
+						if ( ! $orig_still_there ) {
+							// Conflict! Original server was removed or modified by editor in interim.
+							$wpdb->update(
+								$table_queue,
+								array(
+									'state'      => 'conflict',
+									'status'     => 'conflict',
+									'error_msg'  => 'Original server URL modified or deleted by editor in interim. Primary insertion aborted.',
+									'updated_at' => current_time( 'mysql' ),
+								),
+								array( 'id' => (int) $item['id'] )
+							);
+							$logs[] = sprintf( '[CONFLICT] Post #%d: Original server (%s) was changed or deleted by editor. Primary attachment aborted.', $p_id, esc_html( $orig_url ) );
+							continue;
+						}
+
 						// Save pre-modification backup snapshot with mode
-						$wpdb->insert(
+						$ins_b = $wpdb->insert(
 							$table_backups,
 							array(
 								'post_id'             => $p_id,
@@ -884,6 +957,11 @@ class PeeStream_Migrator {
 								'status'              => 'completed',
 							)
 						);
+
+						if ( false === $ins_b || empty( $wpdb->insert_id ) ) {
+							$logs[] = sprintf( '[ERROR] Post #%d: Could not save backup snapshot. Primary attachment aborted.', $p_id );
+							continue;
+						}
 
 						array_unshift( $meta, array(
 							'name'    => $srv_name,
@@ -944,23 +1022,66 @@ class PeeStream_Migrator {
 	}
 
 	private static $lock_key = 'peestream_queue_processing_lock';
+	private static $owner_token = null;
 
 	/**
-	 * Acquire shared concurrency lock for queue processing
+	 * Acquire shared concurrency lock for queue processing using atomic DB option
 	 */
-	public static function acquire_lock() {
-		if ( get_transient( self::$lock_key ) ) {
-			return false;
+	public static function acquire_lock( $timeout = 120 ) {
+		global $wpdb;
+		$token = wp_generate_password( 32, false );
+		$now = time();
+		$expires = $now + $timeout;
+		$lock_val = $token . '|' . $expires;
+
+		// 1. Attempt atomic insert via add_option
+		if ( add_option( self::$lock_key, $lock_val, '', 'no' ) ) {
+			self::$owner_token = $token;
+			return $token;
 		}
-		set_transient( self::$lock_key, time(), 120 );
-		return true;
+
+		// 2. Lock option exists: inspect expiration for safe timeout recovery
+		$current = get_option( self::$lock_key );
+		if ( ! empty( $current ) ) {
+			$parts = explode( '|', $current );
+			$lock_exp = isset( $parts[1] ) ? intval( $parts[1] ) : 0;
+			if ( $lock_exp < $now ) {
+				// Expired: atomic takeover with CAS (Compare-And-Swap)
+				$updated = $wpdb->query( $wpdb->prepare(
+					"UPDATE {$wpdb->options} SET option_value = %s WHERE option_name = %s AND option_value = %s",
+					$lock_val,
+					self::$lock_key,
+					$current
+				) );
+				if ( $updated ) {
+					self::$owner_token = $token;
+					return $token;
+				}
+			}
+		}
+
+		return false;
 	}
 
 	/**
 	 * Release shared concurrency lock
 	 */
-	public static function release_lock() {
-		delete_transient( self::$lock_key );
+	public static function release_lock( $token = null ) {
+		global $wpdb;
+		if ( null === $token ) {
+			$token = self::$owner_token;
+		}
+		if ( empty( $token ) ) {
+			return false;
+		}
+
+		$current = get_option( self::$lock_key );
+		if ( ! empty( $current ) && 0 === strpos( $current, $token . '|' ) ) {
+			delete_option( self::$lock_key );
+			self::$owner_token = null;
+			return true;
+		}
+		return false;
 	}
 
 	/**
@@ -973,7 +1094,8 @@ class PeeStream_Migrator {
 			wp_send_json_error( array( 'message' => __( 'Permission denied.', 'peestream-wp-dooplay' ) ) );
 		}
 
-		if ( ! self::acquire_lock() ) {
+		$lock_token = self::acquire_lock();
+		if ( ! $lock_token ) {
 			wp_send_json_success( array(
 				'checked_count' => 0,
 				'ready_count'   => 0,
@@ -983,11 +1105,22 @@ class PeeStream_Migrator {
 			return;
 		}
 
+		$res = null;
+		$error = null;
 		try {
 			$res = $this->process_queue_batch( 25 );
-			wp_send_json_success( $res );
+		} catch ( Exception $e ) {
+			$error = $e->getMessage();
+		} catch ( Throwable $t ) {
+			$error = $t->getMessage();
 		} finally {
-			self::release_lock();
+			self::release_lock( $lock_token );
+		}
+
+		if ( null !== $error ) {
+			wp_send_json_error( array( 'message' => $error ) );
+		} else {
+			wp_send_json_success( $res );
 		}
 	}
 
@@ -995,7 +1128,8 @@ class PeeStream_Migrator {
 	 * Automated WP-Cron processor with transient concurrency lock
 	 */
 	public static function cron_check_queue() {
-		if ( ! self::acquire_lock() ) {
+		$lock_token = self::acquire_lock();
+		if ( ! $lock_token ) {
 			return;
 		}
 
@@ -1003,7 +1137,7 @@ class PeeStream_Migrator {
 			$migrator = new self();
 			$migrator->process_queue_batch( 20 );
 		} finally {
-			self::release_lock();
+			self::release_lock( $lock_token );
 		}
 	}
 
@@ -1064,9 +1198,8 @@ class PeeStream_Migrator {
 				$orig_repeatable = array();
 			}
 
-			// If mode was not explicitly stored, detect strategy:
-			// If the original URL is still present in current servers, it was a primary prepend!
-			if ( empty( $mode ) ) {
+			// If mode was not explicitly stored or is 'unknown':
+			if ( empty( $mode ) || 'unknown' === $mode ) {
 				$orig_still_present = false;
 				foreach ( $current_meta as $cs ) {
 					if ( isset( $cs['url'] ) && trim( $cs['url'] ) === $orig_url ) {
@@ -1074,7 +1207,18 @@ class PeeStream_Migrator {
 						break;
 					}
 				}
-				$mode = $orig_still_present ? 'primary' : 'replace';
+				if ( $orig_still_present ) {
+					$mode = 'primary';
+				} else {
+					// Mode is unknown and original link is missing from post: do NOT assume replace!
+					$wpdb->update(
+						$table_backups,
+						array( 'status' => 'manual_review' ),
+						array( 'id' => (int) $b['id'] )
+					);
+					$logs[] = sprintf( '[MANUAL REVIEW] Post #%d: Backup mode is unknown and original link is missing. Flagged for manual resolution to prevent data overwrite.', $post_id );
+					continue;
+				}
 			}
 
 			// Surgical rollback: do NOT overwrite entire repeatable_fields with old snapshot!

@@ -78,6 +78,8 @@ final class PeeStream_Plugin {
 		return $schedules;
 	}
 
+	const DB_SCHEMA_VERSION = 102;
+
 	public static function ensure_cron_scheduled() {
 		if ( ! wp_next_scheduled( 'peestream_cron_process_queue' ) ) {
 			wp_schedule_event( time(), 'peestream_two_minutes', 'peestream_cron_process_queue' );
@@ -85,14 +87,16 @@ final class PeeStream_Plugin {
 	}
 
 	public static function check_db_upgrade() {
-		if ( get_option( 'peestream_db_version' ) !== '1.0.1' ) {
-			self::create_tables();
-			update_option( 'peestream_db_version', '1.0.1' );
+		$installed_schema = (int) get_option( 'peestream_schema_version', 0 );
+		if ( $installed_schema < self::DB_SCHEMA_VERSION ) {
+			self::create_tables( $installed_schema );
+			update_option( 'peestream_schema_version', self::DB_SCHEMA_VERSION );
+			update_option( 'peestream_db_version', PEESTREAM_VERSION );
 		}
 		self::ensure_cron_scheduled();
 	}
 
-	public static function create_tables() {
+	public static function create_tables( $from_schema = 0 ) {
 		global $wpdb;
 
 		$charset_collate = $wpdb->get_charset_collate();
@@ -149,7 +153,7 @@ final class PeeStream_Plugin {
 			original_repeatable longtext,
 			migrated_url varchar(500) NOT NULL DEFAULT '',
 			new_code varchar(64) NOT NULL DEFAULT '',
-			mode varchar(20) NOT NULL DEFAULT 'replace',
+			mode varchar(20) NOT NULL DEFAULT 'unknown',
 			backup_time datetime NOT NULL,
 			status varchar(32) NOT NULL DEFAULT 'completed',
 			PRIMARY KEY  (id),
@@ -160,8 +164,10 @@ final class PeeStream_Plugin {
 		// Schema migration: ensure mode column exists in existing backups table
 		$has_mode_col = $wpdb->get_results( "SHOW COLUMNS FROM `{$table_backups}` LIKE 'mode'" );
 		if ( empty( $has_mode_col ) ) {
-			$wpdb->query( "ALTER TABLE `{$table_backups}` ADD COLUMN `mode` varchar(20) NOT NULL DEFAULT 'replace' AFTER `new_code`" );
+			$wpdb->query( "ALTER TABLE `{$table_backups}` ADD COLUMN `mode` varchar(20) NOT NULL DEFAULT 'unknown' AFTER `new_code`" );
 		}
+		// Always migrate any existing empty/null mode records to 'unknown'
+		$wpdb->query( "UPDATE `{$table_backups}` SET `mode` = 'unknown' WHERE `mode` = '' OR `mode` IS NULL" );
 	}
 
 	public static function activate() {
@@ -182,8 +188,9 @@ final class PeeStream_Plugin {
 			add_option( 'peestream_settings', $default_options );
 		}
 
-		self::create_tables();
-		update_option( 'peestream_db_version', '1.0.1' );
+		self::create_tables( 0 );
+		update_option( 'peestream_schema_version', self::DB_SCHEMA_VERSION );
+		update_option( 'peestream_db_version', PEESTREAM_VERSION );
 
 		// Schedule automated background queue processing cron
 		if ( ! wp_next_scheduled( 'peestream_cron_process_queue' ) ) {
