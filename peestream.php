@@ -3,7 +3,7 @@
  * Plugin Name: PeeStream Video Player & DooPlay Integration
  * Plugin URI: https://peestream.com
  * Description: Official PeeStream WordPress plugin with native DooPlay theme player integration, remote URL importer, auto-migrator for competitor hosters, and webhook auto-publish receiver.
- * Version: 1.0.1
+ * Version: 1.0.2
  * Author: PeeStream Team
  * Author URI: https://peestream.com
  * License: GPLv2 or later
@@ -15,7 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'PEESTREAM_VERSION', '1.0.1' );
+define( 'PEESTREAM_VERSION', '1.0.2' );
 define( 'PEESTREAM_PLUGIN_FILE', __FILE__ );
 define( 'PEESTREAM_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'PEESTREAM_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -78,7 +78,7 @@ final class PeeStream_Plugin {
 		return $schedules;
 	}
 
-	const DB_SCHEMA_VERSION = 102;
+	const DB_SCHEMA_VERSION = 103;
 
 	public static function ensure_cron_scheduled() {
 		if ( ! wp_next_scheduled( 'peestream_cron_process_queue' ) ) {
@@ -89,9 +89,11 @@ final class PeeStream_Plugin {
 	public static function check_db_upgrade() {
 		$installed_schema = (int) get_option( 'peestream_schema_version', 0 );
 		if ( $installed_schema < self::DB_SCHEMA_VERSION ) {
-			self::create_tables( $installed_schema );
-			update_option( 'peestream_schema_version', self::DB_SCHEMA_VERSION );
-			update_option( 'peestream_db_version', PEESTREAM_VERSION );
+			$schema_ok = self::create_tables( $installed_schema );
+			if ( $schema_ok ) {
+				update_option( 'peestream_schema_version', self::DB_SCHEMA_VERSION );
+				update_option( 'peestream_db_version', PEESTREAM_VERSION );
+			}
 		}
 		self::ensure_cron_scheduled();
 	}
@@ -145,7 +147,7 @@ final class PeeStream_Plugin {
 		) {$charset_collate};";
 		dbDelta( $sql_queue );
 
-		// 3. Pre-migration backup table
+		// 3. Pre-migration backup table (stores mode, fallback status, and rollback snapshots)
 		$table_backups = $wpdb->prefix . 'peestream_migration_backups';
 		$sql_backups = "CREATE TABLE {$table_backups} (
 			id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
@@ -161,13 +163,35 @@ final class PeeStream_Plugin {
 		) {$charset_collate};";
 		dbDelta( $sql_backups );
 
-		// Schema migration: ensure mode column exists in existing backups table
+		// Strict verification of table creation
+		$has_webhooks = ( $wpdb->get_var( "SHOW TABLES LIKE '{$table_webhooks}'" ) === $table_webhooks );
+		$has_queue    = ( $wpdb->get_var( "SHOW TABLES LIKE '{$table_queue}'" ) === $table_queue );
+		$has_backups  = ( $wpdb->get_var( "SHOW TABLES LIKE '{$table_backups}'" ) === $table_backups );
+
+		if ( ! $has_webhooks || ! $has_queue || ! $has_backups ) {
+			return false;
+		}
+
+		// Schema migration: ensure mode column exists in backups table and has DEFAULT 'unknown'
 		$has_mode_col = $wpdb->get_results( "SHOW COLUMNS FROM `{$table_backups}` LIKE 'mode'" );
 		if ( empty( $has_mode_col ) ) {
 			$wpdb->query( "ALTER TABLE `{$table_backups}` ADD COLUMN `mode` varchar(20) NOT NULL DEFAULT 'unknown' AFTER `new_code`" );
+		} else {
+			// Enforce default 'unknown' so MySQL doesn't assign automatic 'replace'
+			$wpdb->query( "ALTER TABLE `{$table_backups}` MODIFY COLUMN `mode` varchar(20) NOT NULL DEFAULT 'unknown'" );
 		}
-		// Always migrate any existing empty/null mode records to 'unknown'
+
+		// Sanitize legacy backup records:
+		// If migrating from earlier schemas (<103) where mode might have been set to 'replace' automatically,
+		// or if mode is empty/null, reset to 'unknown' unless verified.
 		$wpdb->query( "UPDATE `{$table_backups}` SET `mode` = 'unknown' WHERE `mode` = '' OR `mode` IS NULL" );
+		if ( $from_schema < 103 && $from_schema > 0 ) {
+			// Older versions prior to schema 103 may have had 'replace' automatically assigned by dbDelta/ALTER.
+			// Mark historical backups as 'unknown' so surgical rollback verifies actual presence of original server.
+			$wpdb->query( "UPDATE `{$table_backups}` SET `mode` = 'unknown' WHERE `mode` = 'replace' AND `backup_time` < '" . current_time( 'mysql' ) . "'" );
+		}
+
+		return true;
 	}
 
 	public static function activate() {
@@ -188,9 +212,11 @@ final class PeeStream_Plugin {
 			add_option( 'peestream_settings', $default_options );
 		}
 
-		self::create_tables( 0 );
-		update_option( 'peestream_schema_version', self::DB_SCHEMA_VERSION );
-		update_option( 'peestream_db_version', PEESTREAM_VERSION );
+		$schema_ok = self::create_tables( 0 );
+		if ( $schema_ok ) {
+			update_option( 'peestream_schema_version', self::DB_SCHEMA_VERSION );
+			update_option( 'peestream_db_version', PEESTREAM_VERSION );
+		}
 
 		// Schedule automated background queue processing cron
 		if ( ! wp_next_scheduled( 'peestream_cron_process_queue' ) ) {

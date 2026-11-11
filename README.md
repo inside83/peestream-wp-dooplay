@@ -60,7 +60,7 @@ The official high-performance video player, automation suite, and safe competito
 
 ## Installation
 
-1. Download the release package `peestream-wp-dooplay_v1.0.1.zip`.
+1. Download the release package `peestream-wp-dooplay_v1.0.2.zip`.
 2. Go to **WordPress Admin -> Plugins -> Add New -> Upload Plugin** and select the ZIP file.
 3. Click **Install Now** and activate the plugin.
 4. Go to **PeeStream -> Settings** in your WordPress admin menu.
@@ -88,6 +88,17 @@ array(
 ---
 
 ## Changelog
+
+### Version 1.0.2
+> **Note:** Version 1.0.1 was a pre-release build pending final architectural review. Version 1.0.2 is the recommended, fully verified stable release.
+
+- **Queue Lock Lease Extension & Time Budgeting:** Replaced fixed 120s queue lock timeout with per-task heartbeat lease extension (`extend_lock`) and execution time budgeting (`max_execution_time`). Slow API responses can no longer cause an active worker's lock to expire and be usurped by a concurrent worker.
+- **Atomic Lock Release by Owner Token:** Implemented atomic SQL conditional deletion (`DELETE FROM wp_options WHERE option_name = %s AND option_value LIKE %s`), ensuring a worker can only release its own lock token and cannot clear locks acquired by another process.
+- **Verified Post Meta Persistence:** In both manual AJAX and background WP-Cron queue processing, DooPlay `repeatable_fields` updates are strictly verified (`fresh_meta === target_meta`) before marking queue items as `completed`.
+- **Partial Failure Recovery & Crash Protection:** Backups are written with status `in_progress` prior to post modification and promoted to `completed` only after post meta is confirmed saved. Added `recover_partial_failures()` to automatically identify and flag interrupted jobs as `apply_failed` without corrupting post data.
+- **Legacy Backup Mode Migration & Duplicate Prevention:** Enforced `DEFAULT 'unknown'` on schema version 103 for the backup `mode` column; migrated historical empty backup modes to `'unknown'`. If an old backup recorded mode as `replace` but the original URL is already present in the post, `ajax_rollback()` safely overrides to `primary` to prevent duplicating original servers.
+- **Webhook Crash Recovery & Draft Deduplication:** Added immediate post link persistence (`_peestream_webhook_filecode` and `post_id` audit column) right after `wp_insert_post()`. Subsequent webhook retries re-use existing draft posts, preventing duplicate post creation.
+- **Decoupled DB Schema Versioning:** Upgraded to `DB_SCHEMA_VERSION = 103`, saving the schema option strictly after all tables and column modifications return verified success.
 
 ### Version 1.0.1
 - **Server Integrity & Strict Matching:** `replace` migration strictly matches identical original server URLs, eliminating loose hostname matching to protect posts containing multiple servers from the same hoster.

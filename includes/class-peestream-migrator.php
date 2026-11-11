@@ -615,7 +615,7 @@ class PeeStream_Migrator {
 							}
 						}
 
-						// Create backup snapshot before modifying
+						// Create backup snapshot before modifying (status in_progress until post update verified)
 						$ins_b = $wpdb->insert(
 							$table_backups,
 							array(
@@ -625,7 +625,7 @@ class PeeStream_Migrator {
 								'new_code'            => $filecode,
 								'mode'                => $mode,
 								'backup_time'         => current_time( 'mysql' ),
-								'status'              => 'completed',
+								'status'              => 'in_progress',
 							)
 						);
 
@@ -633,6 +633,8 @@ class PeeStream_Migrator {
 							$logs[] = sprintf( '[ERROR] Post #%d: Could not save backup snapshot. Post modification aborted for safety.', $p_id );
 							continue;
 						}
+						$current_backup_id = (int) $wpdb->insert_id;
+						$current_target_url = $url;
 
 						if ( 'replace' === $mode ) {
 							$srv['url']     = $new_url;
@@ -658,26 +660,60 @@ class PeeStream_Migrator {
 							$post_modified = true;
 							$logs[] = sprintf( '[READY - PRIMARY] Post #%d: PeeStream %s attached as Server 1. Original %s retained as fallback.', $p_id, $filecode, $detected['name'] );
 						}
-
-						// Update queue status to completed
-						$wpdb->update(
-							$table_queue,
-							array(
-								'state'      => 'ready',
-								'status'     => 'completed',
-								'updated_at' => current_time( 'mysql' ),
-							),
-							array( 'post_id' => $p_id, 'original_url' => $url )
-						);
 					}
 				}
 			}
 			unset( $srv );
 
 			if ( $post_modified ) {
-				$meta = array_values( $meta );
-				update_post_meta( $p_id, 'repeatable_fields', $meta );
-				$processed_count++;
+				$meta_to_save = array_values( $meta );
+				update_post_meta( $p_id, 'repeatable_fields', $meta_to_save );
+
+				// Strict verification: verify that post meta was indeed persisted
+				$fresh_meta = get_post_meta( $p_id, 'repeatable_fields', true );
+				if ( is_string( $fresh_meta ) ) {
+					$fresh_meta = maybe_unserialize( $fresh_meta );
+				}
+				$is_saved = ( $fresh_meta === $meta_to_save );
+
+				if ( $is_saved ) {
+					if ( ! empty( $current_backup_id ) ) {
+						$wpdb->update(
+							$table_backups,
+							array( 'status' => 'completed' ),
+							array( 'id' => $current_backup_id )
+						);
+					}
+					$wpdb->update(
+						$table_queue,
+						array(
+							'state'      => 'ready',
+							'status'     => 'completed',
+							'updated_at' => current_time( 'mysql' ),
+						),
+						array( 'post_id' => $p_id, 'original_url' => $current_target_url )
+					);
+					$processed_count++;
+				} else {
+					if ( ! empty( $current_backup_id ) ) {
+						$wpdb->update(
+							$table_backups,
+							array( 'status' => 'apply_failed' ),
+							array( 'id' => $current_backup_id )
+						);
+					}
+					$wpdb->update(
+						$table_queue,
+						array(
+							'state'      => 'apply_failed',
+							'status'     => 'failed',
+							'error_msg'  => 'Failed to verify repeatable_fields post meta update. Post preserved.',
+							'updated_at' => current_time( 'mysql' ),
+						),
+						array( 'post_id' => $p_id, 'original_url' => $current_target_url )
+					);
+					$logs[] = sprintf( '[ERROR] Post #%d: Could not verify repeatable_fields post meta update. Queue marked failed.', $p_id );
+				}
 			}
 		}
 
@@ -749,8 +785,9 @@ class PeeStream_Migrator {
 	/**
 	 * Core batch processor for pending migration queue items
 	 * Shared between manual AJAX checks and automated WP-Cron runs
+	 * Features heartbeat lock renewal, time budgeting, and post meta update verification
 	 */
-	public function process_queue_batch( $limit = 20 ) {
+	public function process_queue_batch( $limit = 10, $max_execution_time = 45 ) {
 		$api_key = ! empty( $this->options['api_key'] ) ? $this->options['api_key'] : '';
 		if ( empty( $api_key ) ) {
 			return array(
@@ -768,6 +805,10 @@ class PeeStream_Migrator {
 		$table_queue   = $wpdb->prefix . 'peestream_migration_queue';
 		$table_backups = $wpdb->prefix . 'peestream_migration_backups';
 
+		// Recover from any interrupted partial operations before starting new items
+		self::recover_partial_failures();
+
+		$start_time = time();
 		$stale_checking_time = date( 'Y-m-d H:i:s', time() - 300 );
 		$pending_items = $wpdb->get_results(
 			$wpdb->prepare(
@@ -785,6 +826,15 @@ class PeeStream_Migrator {
 		$logs = array();
 
 		foreach ( $pending_items as $item ) {
+			// Extend lock lease on each task (heartbeat) so active worker is never usurped by timeout
+			self::extend_lock( self::$owner_token, 120 );
+
+			// Check execution time budget to prevent exceeding PHP max_execution_time
+			if ( ( time() - $start_time ) >= $max_execution_time ) {
+				$logs[] = '[BUDGET] Batch execution time budget reached. Deferring remaining queue items to next run.';
+				break;
+			}
+
 			$p_id        = (int) $item['post_id'];
 			$filecode    = $item['filecode'];
 			$orig_url    = $item['original_url'];
@@ -862,131 +912,184 @@ class PeeStream_Migrator {
 					}
 				}
 
-				if ( ! $already_present ) {
-					$snapshot_meta = $meta;
-
-					if ( 'replace' === $mode ) {
-						// Surgical in-place replacement of the STRICT original URL only (no loose hostname matching)
-						$replaced = false;
-						foreach ( $meta as &$srv ) {
-							if ( isset( $srv['url'] ) && trim( $srv['url'] ) === $orig_url ) {
-								$srv['url']    = $new_url;
-								$srv['name']   = $srv_name;
-								$srv['select'] = 'iframe';
-								if ( ! empty( $language ) ) $srv['idioma'] = $language;
-								if ( ! empty( $quality ) ) $srv['quality'] = $quality;
-								$replaced = true;
-								break;
-							}
-						}
-						unset( $srv );
-
-						if ( ! $replaced ) {
-							// Conflict! Original server was removed or modified by editor in interim.
-							// Do NOT add a new server automatically. Flag conflict.
-							$wpdb->update(
-								$table_queue,
-								array(
-									'state'      => 'conflict',
-									'status'     => 'conflict',
-									'error_msg'  => 'Original server URL modified or deleted by editor in interim. Replacement aborted.',
-									'updated_at' => current_time( 'mysql' ),
-								),
-								array( 'id' => (int) $item['id'] )
-							);
-							$logs[] = sprintf( '[CONFLICT] Post #%d: Target server (%s) was changed or deleted by editor. Automatic replacement aborted.', $p_id, esc_html( $orig_url ) );
-							continue;
-						}
-
-						// Save pre-modification backup snapshot with mode
-						$ins_b = $wpdb->insert(
-							$table_backups,
-							array(
-								'post_id'             => $p_id,
-								'original_repeatable' => maybe_serialize( $snapshot_meta ),
-								'migrated_url'        => $orig_url,
-								'new_code'            => $filecode,
-								'mode'                => 'replace',
-								'backup_time'         => current_time( 'mysql' ),
-								'status'              => 'completed',
-							)
-						);
-
-						if ( false === $ins_b || empty( $wpdb->insert_id ) ) {
-							$logs[] = sprintf( '[ERROR] Post #%d: Could not save backup snapshot. Replace modification aborted.', $p_id );
-							continue;
-						}
-
-						update_post_meta( $p_id, 'repeatable_fields', array_values( $meta ) );
-					} else {
-						// Primary strategy: Verify original server still exists before prepending
-						$orig_still_there = false;
-						foreach ( $meta as $check_s ) {
-							if ( isset( $check_s['url'] ) && trim( $check_s['url'] ) === $orig_url ) {
-								$orig_still_there = true;
-								break;
-							}
-						}
-
-						if ( ! $orig_still_there ) {
-							// Conflict! Original server was removed or modified by editor in interim.
-							$wpdb->update(
-								$table_queue,
-								array(
-									'state'      => 'conflict',
-									'status'     => 'conflict',
-									'error_msg'  => 'Original server URL modified or deleted by editor in interim. Primary insertion aborted.',
-									'updated_at' => current_time( 'mysql' ),
-								),
-								array( 'id' => (int) $item['id'] )
-							);
-							$logs[] = sprintf( '[CONFLICT] Post #%d: Original server (%s) was changed or deleted by editor. Primary attachment aborted.', $p_id, esc_html( $orig_url ) );
-							continue;
-						}
-
-						// Save pre-modification backup snapshot with mode
-						$ins_b = $wpdb->insert(
-							$table_backups,
-							array(
-								'post_id'             => $p_id,
-								'original_repeatable' => maybe_serialize( $snapshot_meta ),
-								'migrated_url'        => $orig_url,
-								'new_code'            => $filecode,
-								'mode'                => 'primary',
-								'backup_time'         => current_time( 'mysql' ),
-								'status'              => 'completed',
-							)
-						);
-
-						if ( false === $ins_b || empty( $wpdb->insert_id ) ) {
-							$logs[] = sprintf( '[ERROR] Post #%d: Could not save backup snapshot. Primary attachment aborted.', $p_id );
-							continue;
-						}
-
-						array_unshift( $meta, array(
-							'name'    => $srv_name,
-							'select'  => 'iframe',
-							'idioma'  => $language,
-							'quality' => $quality,
-							'url'     => $new_url,
-						) );
-
-						update_post_meta( $p_id, 'repeatable_fields', array_values( $meta ) );
-					}
+				if ( $already_present ) {
+					$wpdb->update(
+						$table_queue,
+						array(
+							'state'      => 'ready',
+							'status'     => 'completed',
+							'updated_at' => current_time( 'mysql' ),
+						),
+						array( 'id' => (int) $item['id'] )
+					);
+					$logs[] = sprintf( '[ALREADY PRESENT] Post #%d: Player %s already present in post.', $p_id, $filecode );
+					continue;
 				}
 
-				$wpdb->update(
-					$table_queue,
-					array(
-						'state'      => 'ready',
-						'status'     => 'completed',
-						'updated_at' => current_time( 'mysql' ),
-					),
-					array( 'id' => (int) $item['id'] )
-				);
+				$snapshot_meta = $meta;
+				$post_modified = false;
+				$backup_id = 0;
 
-				$updated_count++;
-				$logs[] = sprintf( '[READY] Post #%d: Video %s is ready! PeeStream player attached (Strategy: %s).', $p_id, $filecode, $mode );
+				if ( 'replace' === $mode ) {
+					// Surgical in-place replacement of the STRICT original URL only (no loose hostname matching)
+					$replaced = false;
+					foreach ( $meta as &$srv ) {
+						if ( isset( $srv['url'] ) && trim( $srv['url'] ) === $orig_url ) {
+							$srv['url']    = $new_url;
+							$srv['name']   = $srv_name;
+							$srv['select'] = 'iframe';
+							if ( ! empty( $language ) ) $srv['idioma'] = $language;
+							if ( ! empty( $quality ) ) $srv['quality'] = $quality;
+							$replaced = true;
+							break;
+						}
+					}
+					unset( $srv );
+
+					if ( ! $replaced ) {
+						// Conflict! Original server was removed or modified by editor in interim.
+						$wpdb->update(
+							$table_queue,
+							array(
+								'state'      => 'conflict',
+								'status'     => 'conflict',
+								'error_msg'  => 'Original server URL modified or deleted by editor in interim. Replacement aborted.',
+								'updated_at' => current_time( 'mysql' ),
+							),
+							array( 'id' => (int) $item['id'] )
+						);
+						$logs[] = sprintf( '[CONFLICT] Post #%d: Target server (%s) was changed or deleted by editor. Automatic replacement aborted.', $p_id, esc_html( $orig_url ) );
+						continue;
+					}
+
+					// Save pre-modification backup snapshot initially with in_progress status
+					$ins_b = $wpdb->insert(
+						$table_backups,
+						array(
+							'post_id'             => $p_id,
+							'original_repeatable' => maybe_serialize( $snapshot_meta ),
+							'migrated_url'        => $orig_url,
+							'new_code'            => $filecode,
+							'mode'                => 'replace',
+							'backup_time'         => current_time( 'mysql' ),
+							'status'              => 'in_progress',
+						)
+					);
+
+					if ( false === $ins_b || empty( $wpdb->insert_id ) ) {
+						$logs[] = sprintf( '[ERROR] Post #%d: Could not save backup snapshot. Replace modification aborted.', $p_id );
+						continue;
+					}
+					$backup_id = (int) $wpdb->insert_id;
+					$post_modified = true;
+				} else {
+					// Primary strategy: Verify original server still exists before prepending
+					$orig_still_there = false;
+					foreach ( $meta as $check_s ) {
+						if ( isset( $check_s['url'] ) && trim( $check_s['url'] ) === $orig_url ) {
+							$orig_still_there = true;
+							break;
+						}
+					}
+
+					if ( ! $orig_still_there ) {
+						// Conflict! Original server was removed or modified by editor in interim.
+						$wpdb->update(
+							$table_queue,
+							array(
+								'state'      => 'conflict',
+								'status'     => 'conflict',
+								'error_msg'  => 'Original server URL modified or deleted by editor in interim. Primary insertion aborted.',
+								'updated_at' => current_time( 'mysql' ),
+							),
+							array( 'id' => (int) $item['id'] )
+						);
+						$logs[] = sprintf( '[CONFLICT] Post #%d: Original server (%s) was changed or deleted by editor. Primary attachment aborted.', $p_id, esc_html( $orig_url ) );
+						continue;
+					}
+
+					// Save pre-modification backup snapshot initially with in_progress status
+					$ins_b = $wpdb->insert(
+						$table_backups,
+						array(
+							'post_id'             => $p_id,
+							'original_repeatable' => maybe_serialize( $snapshot_meta ),
+							'migrated_url'        => $orig_url,
+							'new_code'            => $filecode,
+							'mode'                => 'primary',
+							'backup_time'         => current_time( 'mysql' ),
+							'status'              => 'in_progress',
+						)
+					);
+
+					if ( false === $ins_b || empty( $wpdb->insert_id ) ) {
+						$logs[] = sprintf( '[ERROR] Post #%d: Could not save backup snapshot. Primary attachment aborted.', $p_id );
+						continue;
+					}
+					$backup_id = (int) $wpdb->insert_id;
+
+					array_unshift( $meta, array(
+						'name'    => $srv_name,
+						'select'  => 'iframe',
+						'idioma'  => $language,
+						'quality' => $quality,
+						'url'     => $new_url,
+					) );
+					$post_modified = true;
+				}
+
+				if ( $post_modified ) {
+					$meta_to_save = array_values( $meta );
+					update_post_meta( $p_id, 'repeatable_fields', $meta_to_save );
+
+					// Strict verification of persisted repeatable_fields
+					$fresh_meta = get_post_meta( $p_id, 'repeatable_fields', true );
+					if ( is_string( $fresh_meta ) ) {
+						$fresh_meta = maybe_unserialize( $fresh_meta );
+					}
+					$is_saved = ( $fresh_meta === $meta_to_save );
+
+					if ( $is_saved ) {
+						if ( $backup_id > 0 ) {
+							$wpdb->update(
+								$table_backups,
+								array( 'status' => 'completed' ),
+								array( 'id' => $backup_id )
+							);
+						}
+						$wpdb->update(
+							$table_queue,
+							array(
+								'state'      => 'ready',
+								'status'     => 'completed',
+								'updated_at' => current_time( 'mysql' ),
+							),
+							array( 'id' => (int) $item['id'] )
+						);
+						$updated_count++;
+						$logs[] = sprintf( '[READY] Post #%d: Video %s is ready! PeeStream player attached (Strategy: %s).', $p_id, $filecode, $mode );
+					} else {
+						// Post meta update failed verification: mark backup and queue failed without falsely completing
+						if ( $backup_id > 0 ) {
+							$wpdb->update(
+								$table_backups,
+								array( 'status' => 'apply_failed' ),
+								array( 'id' => $backup_id )
+							);
+						}
+						$wpdb->update(
+							$table_queue,
+							array(
+								'state'      => 'apply_failed',
+								'status'     => 'failed',
+								'error_msg'  => 'Failed to verify repeatable_fields post meta update. Post preserved.',
+								'updated_at' => current_time( 'mysql' ),
+							),
+							array( 'id' => (int) $item['id'] )
+						);
+						$logs[] = sprintf( '[ERROR] Post #%d: Could not verify repeatable_fields post meta update. Queue marked failed.', $p_id );
+					}
+				}
 			} elseif ( ( isset( $info['state'] ) && 'failed' === $info['state'] ) || ( isset( $info['status'] ) && 404 === (int) $info['status'] ) ) {
 				$wpdb->update(
 					$table_queue,
@@ -1054,6 +1157,9 @@ class PeeStream_Migrator {
 					$current
 				) );
 				if ( $updated ) {
+					if ( function_exists( 'wp_cache_delete' ) ) {
+						wp_cache_delete( self::$lock_key, 'options' );
+					}
 					self::$owner_token = $token;
 					return $token;
 				}
@@ -1064,7 +1170,35 @@ class PeeStream_Migrator {
 	}
 
 	/**
-	 * Release shared concurrency lock
+	 * Extend existing concurrency lock lease (heartbeat for active long-running workers)
+	 */
+	public static function extend_lock( $token = null, $timeout = 120 ) {
+		global $wpdb;
+		if ( null === $token ) {
+			$token = self::$owner_token;
+		}
+		if ( empty( $token ) ) {
+			return false;
+		}
+		$now = time();
+		$new_exp = $now + $timeout;
+		$new_val = $token . '|' . $new_exp;
+
+		$updated = $wpdb->query( $wpdb->prepare(
+			"UPDATE {$wpdb->options} SET option_value = %s WHERE option_name = %s AND option_value LIKE %s",
+			$new_val,
+			self::$lock_key,
+			$wpdb->esc_like( $token ) . '|%'
+		) );
+		if ( function_exists( 'wp_cache_delete' ) ) {
+			wp_cache_delete( self::$lock_key, 'options' );
+		}
+		return ( $updated > 0 );
+	}
+
+	/**
+	 * Release shared concurrency lock using conditional atomic SQL DELETE
+	 * Deletes ONLY if current option_value is owned by the provided token.
 	 */
 	public static function release_lock( $token = null ) {
 		global $wpdb;
@@ -1075,13 +1209,75 @@ class PeeStream_Migrator {
 			return false;
 		}
 
-		$current = get_option( self::$lock_key );
-		if ( ! empty( $current ) && 0 === strpos( $current, $token . '|' ) ) {
-			delete_option( self::$lock_key );
-			self::$owner_token = null;
+		// Conditional atomic SQL delete by owner token
+		$deleted = $wpdb->query( $wpdb->prepare(
+			"DELETE FROM {$wpdb->options} WHERE option_name = %s AND option_value LIKE %s",
+			self::$lock_key,
+			$wpdb->esc_like( $token ) . '|%'
+		) );
+
+		if ( function_exists( 'wp_cache_delete' ) ) {
+			wp_cache_delete( self::$lock_key, 'options' );
+		}
+		if ( $deleted > 0 ) {
+			if ( $token === self::$owner_token ) {
+				self::$owner_token = null;
+			}
 			return true;
 		}
 		return false;
+	}
+
+	/**
+	 * Safely recover from partial failures where backup succeeded but post_meta update did not finish
+	 */
+	public static function recover_partial_failures() {
+		global $wpdb;
+		$table_backups = $wpdb->prefix . 'peestream_migration_backups';
+		$table_queue   = $wpdb->prefix . 'peestream_migration_queue';
+
+		// Look for in_progress backups older than 2 minutes
+		$cutoff = date( 'Y-m-d H:i:s', time() - 120 );
+		$in_progress = $wpdb->get_results( $wpdb->prepare(
+			"SELECT * FROM {$table_backups} WHERE status = 'in_progress' AND backup_time < %s LIMIT 20",
+			$cutoff
+		), ARRAY_A );
+
+		if ( empty( $in_progress ) ) {
+			return;
+		}
+
+		foreach ( $in_progress as $b ) {
+			$post_id  = (int) $b['post_id'];
+			$new_code = trim( (string) $b['new_code'] );
+			$orig_url = trim( (string) $b['migrated_url'] );
+
+			$current_meta = get_post_meta( $post_id, 'repeatable_fields', true );
+			if ( is_string( $current_meta ) ) {
+				$current_meta = maybe_unserialize( $current_meta );
+			}
+			if ( ! is_array( $current_meta ) ) {
+				$current_meta = array();
+			}
+
+			$has_player = false;
+			foreach ( $current_meta as $srv ) {
+				if ( isset( $srv['url'] ) && ( strpos( $srv['url'], '/e/' . $new_code ) !== false || $srv['url'] === $new_code ) ) {
+					$has_player = true;
+					break;
+				}
+			}
+
+			if ( $has_player ) {
+				// Post modification was actually completed before interruption
+				$wpdb->update( $table_backups, array( 'status' => 'completed' ), array( 'id' => (int) $b['id'] ) );
+				$wpdb->update( $table_queue, array( 'status' => 'completed', 'state' => 'ready' ), array( 'post_id' => $post_id, 'original_url' => $orig_url ) );
+			} else {
+				// Post modification was interrupted or failed: mark backup as apply_failed and queue as pending for safe retry
+				$wpdb->update( $table_backups, array( 'status' => 'apply_failed' ), array( 'id' => (int) $b['id'] ) );
+				$wpdb->update( $table_queue, array( 'status' => 'pending', 'error_msg' => 'Recovered from interrupted partial update' ), array( 'post_id' => $post_id, 'original_url' => $orig_url ) );
+			}
+		}
 	}
 
 	/**
@@ -1174,6 +1370,7 @@ class PeeStream_Migrator {
 
 		if ( empty( $backups ) ) {
 			wp_send_json_error( array( 'message' => __( 'No active backups found to rollback.', 'peestream-wp-dooplay' ) ) );
+			return;
 		}
 
 		$restored_count = 0;
@@ -1198,15 +1395,16 @@ class PeeStream_Migrator {
 				$orig_repeatable = array();
 			}
 
+			$orig_still_present = false;
+			foreach ( $current_meta as $cs ) {
+				if ( isset( $cs['url'] ) && trim( $cs['url'] ) === $orig_url ) {
+					$orig_still_present = true;
+					break;
+				}
+			}
+
 			// If mode was not explicitly stored or is 'unknown':
 			if ( empty( $mode ) || 'unknown' === $mode ) {
-				$orig_still_present = false;
-				foreach ( $current_meta as $cs ) {
-					if ( isset( $cs['url'] ) && trim( $cs['url'] ) === $orig_url ) {
-						$orig_still_present = true;
-						break;
-					}
-				}
 				if ( $orig_still_present ) {
 					$mode = 'primary';
 				} else {
@@ -1219,6 +1417,11 @@ class PeeStream_Migrator {
 					$logs[] = sprintf( '[MANUAL REVIEW] Post #%d: Backup mode is unknown and original link is missing. Flagged for manual resolution to prevent data overwrite.', $post_id );
 					continue;
 				}
+			} elseif ( 'replace' === $mode && $orig_still_present ) {
+				// Safety override: mode recorded as replace, but original server URL is already in post.
+				// This indicates historical mode misclassification or primary strategy was actually used.
+				// Re-classify to primary so we remove only PeeStream without duplicating the original server.
+				$mode = 'primary';
 			}
 
 			// Surgical rollback: do NOT overwrite entire repeatable_fields with old snapshot!

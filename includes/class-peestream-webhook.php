@@ -382,25 +382,57 @@ class PeeStream_Webhook {
 
 		// B. Auto-Create Episode Post (ONLY if parent TV show is verified AND auto-create is explicitly enabled)
 		if ( $auto_create && $parent_show_id > 0 ) {
-			$author_id = $this->get_default_author_id();
-			$show_name = get_the_title( $parent_show_id );
-			$ep_post_title = sprintf( '%s: %dx%d', $show_name, $season, $episode );
-
-			$new_post_id = wp_insert_post( array(
-				'post_title'   => $ep_post_title,
-				'post_content' => sprintf( 'Watch %s Season %d Episode %d online in full HD.', esc_html( $show_name ), $season, $episode ),
-				'post_status'  => 'draft', // Draft status for safe review
-				'post_type'    => 'episodes',
-				'post_author'  => $author_id,
+			// Idempotent recovery check: Did a previous interrupted attempt already create this draft post?
+			$existing_draft_id = (int) $wpdb->get_var( $wpdb->prepare(
+				"SELECT post_id FROM {$table_webhooks} WHERE file_code = %s AND event = %s AND post_id > 0",
+				$file_code,
+				$event
 			) );
 
-			if ( is_wp_error( $new_post_id ) ) {
+			if ( ! $existing_draft_id ) {
+				$existing_draft_id = (int) $wpdb->get_var( $wpdb->prepare(
+					"SELECT p.ID FROM {$wpdb->posts} p
+					 INNER JOIN {$wpdb->postmeta} pm ON (p.ID = pm.post_id AND pm.meta_key = '_peestream_webhook_filecode')
+					 WHERE pm.meta_value = %s AND p.post_type = 'episodes' AND p.post_status = 'draft' LIMIT 1",
+					$file_code
+				) );
+			}
+
+			$show_name = get_the_title( $parent_show_id );
+			$new_post_id = 0;
+
+			if ( $existing_draft_id > 0 && get_post( $existing_draft_id ) ) {
+				// Re-use existing draft post from interrupted attempt (zero duplicate post creation!)
+				$new_post_id = $existing_draft_id;
+			} else {
+				$author_id = $this->get_default_author_id();
+				$ep_post_title = sprintf( '%s: %dx%d', $show_name, $season, $episode );
+
+				$new_post_id = wp_insert_post( array(
+					'post_title'   => $ep_post_title,
+					'post_content' => sprintf( 'Watch %s Season %d Episode %d online in full HD.', esc_html( $show_name ), $season, $episode ),
+					'post_status'  => 'draft', // Draft status for safe review
+					'post_type'    => 'episodes',
+					'post_author'  => $author_id,
+				) );
+
+				if ( is_wp_error( $new_post_id ) ) {
+					$wpdb->update(
+						$table_webhooks,
+						array( 'status' => 'failed', 'received_at' => $now_date ),
+						array( 'file_code' => $file_code, 'event' => $event )
+					);
+					return new WP_REST_Response( array( 'success' => false, 'error' => $new_post_id->get_error_message() ), 500 );
+				}
+
+				// Immediately link post ID to webhook audit record and postmeta for atomicity & crash recovery
+				update_post_meta( $new_post_id, '_peestream_webhook_filecode', $file_code );
+				update_post_meta( $new_post_id, '_peestream_webhook_event', $event );
 				$wpdb->update(
 					$table_webhooks,
-					array( 'status' => 'failed', 'received_at' => $now_date ),
+					array( 'post_id' => $new_post_id ),
 					array( 'file_code' => $file_code, 'event' => $event )
 				);
-				return new WP_REST_Response( array( 'success' => false, 'error' => $new_post_id->get_error_message() ), 500 );
 			}
 
 			// Assign DooPlay metadata
@@ -537,24 +569,56 @@ class PeeStream_Webhook {
 
 		// B. Auto-Create Movie (Draft only, if enabled)
 		if ( $auto_create ) {
-			$target_cpt = ! empty( $this->options['default_post_type'] ) ? $this->options['default_post_type'] : 'movies';
-			$author_id  = $this->get_default_author_id();
-
-			$new_post_id = wp_insert_post( array(
-				'post_title'   => $title,
-				'post_content' => sprintf( 'Watch %s online in full HD.', esc_html( $title ) ),
-				'post_status'  => 'draft',
-				'post_type'    => $target_cpt,
-				'post_author'  => $author_id,
+			// Idempotent recovery check: Did a previous interrupted attempt already create this draft post?
+			$existing_draft_id = (int) $wpdb->get_var( $wpdb->prepare(
+				"SELECT post_id FROM {$table_webhooks} WHERE file_code = %s AND event = %s AND post_id > 0",
+				$file_code,
+				$event
 			) );
 
-			if ( is_wp_error( $new_post_id ) ) {
+			if ( ! $existing_draft_id ) {
+				$existing_draft_id = (int) $wpdb->get_var( $wpdb->prepare(
+					"SELECT p.ID FROM {$wpdb->posts} p
+					 INNER JOIN {$wpdb->postmeta} pm ON (p.ID = pm.post_id AND pm.meta_key = '_peestream_webhook_filecode')
+					 WHERE pm.meta_value = %s AND p.post_status = 'draft' LIMIT 1",
+					$file_code
+				) );
+			}
+
+			$new_post_id = 0;
+
+			if ( $existing_draft_id > 0 && get_post( $existing_draft_id ) ) {
+				// Re-use existing draft post from interrupted attempt (zero duplicate post creation!)
+				$new_post_id = $existing_draft_id;
+			} else {
+				$target_cpt = ! empty( $this->options['default_post_type'] ) ? $this->options['default_post_type'] : 'movies';
+				$author_id  = $this->get_default_author_id();
+
+				$new_post_id = wp_insert_post( array(
+					'post_title'   => $title,
+					'post_content' => sprintf( 'Watch %s online in full HD.', esc_html( $title ) ),
+					'post_status'  => 'draft',
+					'post_type'    => $target_cpt,
+					'post_author'  => $author_id,
+				) );
+
+				if ( is_wp_error( $new_post_id ) ) {
+					$wpdb->update(
+						$table_webhooks,
+						array( 'status' => 'failed', 'received_at' => $now_date ),
+						array( 'file_code' => $file_code, 'event' => $event )
+					);
+					return new WP_REST_Response( array( 'success' => false, 'error' => $new_post_id->get_error_message() ), 500 );
+				}
+
+				// Immediately link post ID to webhook audit record and postmeta for atomicity & crash recovery
+				update_post_meta( $new_post_id, '_peestream_webhook_filecode', $file_code );
+				update_post_meta( $new_post_id, '_peestream_webhook_event', $event );
 				$wpdb->update(
 					$table_webhooks,
-					array( 'status' => 'failed', 'received_at' => $now_date ),
+					array( 'post_id' => $new_post_id ),
 					array( 'file_code' => $file_code, 'event' => $event )
 				);
-				return new WP_REST_Response( array( 'success' => false, 'error' => $new_post_id->get_error_message() ), 500 );
 			}
 
 			if ( ! empty( $imdb_id ) ) {
