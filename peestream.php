@@ -78,7 +78,7 @@ final class PeeStream_Plugin {
 		return $schedules;
 	}
 
-	const DB_SCHEMA_VERSION = 104;
+	const DB_SCHEMA_VERSION = 105;
 
 	public static function ensure_cron_scheduled() {
 		if ( ! wp_next_scheduled( 'peestream_cron_process_queue' ) ) {
@@ -123,12 +123,13 @@ final class PeeStream_Plugin {
 		) {$charset_collate};";
 		dbDelta( $sql_webhooks );
 
-		// 2. Migration queue table (stores mode, server name, language, quality, and retry tracking)
+		// 2. Migration queue table (stores mode, server name, language, quality, url_hash, owner_token, and retry tracking)
 		$table_queue = $wpdb->prefix . 'peestream_migration_queue';
 		$sql_queue = "CREATE TABLE {$table_queue} (
 			id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
 			post_id bigint(20) unsigned NOT NULL,
 			original_url varchar(500) NOT NULL,
+			url_hash varchar(64) NOT NULL DEFAULT '',
 			filecode varchar(64) NOT NULL DEFAULT '',
 			mode varchar(20) NOT NULL DEFAULT 'replace',
 			server_name varchar(100) NOT NULL DEFAULT 'PeeStream HD',
@@ -141,8 +142,9 @@ final class PeeStream_Plugin {
 			created_at datetime NOT NULL,
 			updated_at datetime NOT NULL,
 			status varchar(32) NOT NULL DEFAULT 'pending',
+			owner_token varchar(64) NOT NULL DEFAULT '',
 			PRIMARY KEY  (id),
-			UNIQUE KEY uq_post_orig (post_id, original_url(191)),
+			UNIQUE KEY uq_post_urlhash (post_id, url_hash),
 			KEY idx_post_id (post_id),
 			KEY idx_status (status)
 		) {$charset_collate};";
@@ -164,20 +166,76 @@ final class PeeStream_Plugin {
 		) {$charset_collate};";
 		dbDelta( $sql_backups );
 
+		// 4. Archive table for safely preserving historical duplicates
+		$table_archive = $wpdb->prefix . 'peestream_migration_queue_archive';
+		$sql_archive = "CREATE TABLE {$table_archive} (
+			id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+			original_queue_id bigint(20) unsigned NOT NULL DEFAULT 0,
+			post_id bigint(20) unsigned NOT NULL,
+			original_url varchar(500) NOT NULL,
+			url_hash varchar(64) NOT NULL DEFAULT '',
+			filecode varchar(64) NOT NULL DEFAULT '',
+			mode varchar(20) NOT NULL DEFAULT 'replace',
+			server_name varchar(100) NOT NULL DEFAULT 'PeeStream HD',
+			language varchar(50) NOT NULL DEFAULT 'English',
+			quality varchar(20) NOT NULL DEFAULT '1080p',
+			state varchar(32) NOT NULL DEFAULT 'pending',
+			retry_count int(11) NOT NULL DEFAULT 0,
+			error_msg varchar(255) NOT NULL DEFAULT '',
+			original_repeatable longtext,
+			created_at datetime NOT NULL,
+			updated_at datetime NOT NULL,
+			archived_at datetime NOT NULL,
+			status varchar(32) NOT NULL DEFAULT 'pending',
+			owner_token varchar(64) NOT NULL DEFAULT '',
+			PRIMARY KEY  (id),
+			KEY idx_post_id (post_id)
+		) {$charset_collate};";
+		dbDelta( $sql_archive );
+
 		// Strict verification of table creation
 		$has_webhooks = ( $wpdb->get_var( "SHOW TABLES LIKE '{$table_webhooks}'" ) === $table_webhooks );
 		$has_queue    = ( $wpdb->get_var( "SHOW TABLES LIKE '{$table_queue}'" ) === $table_queue );
 		$has_backups  = ( $wpdb->get_var( "SHOW TABLES LIKE '{$table_backups}'" ) === $table_backups );
+		$has_archive  = ( $wpdb->get_var( "SHOW TABLES LIKE '{$table_archive}'" ) === $table_archive );
 
-		if ( ! $has_webhooks || ! $has_queue || ! $has_backups ) {
+		if ( ! $has_webhooks || ! $has_queue || ! $has_backups || ! $has_archive ) {
 			return false;
 		}
 
-		// Ensure uq_post_orig unique index exists on queue table (deduplicate if needed)
-		$idx_queue = $wpdb->get_results( "SHOW INDEX FROM `{$table_queue}` WHERE Key_name = 'uq_post_orig'" );
-		if ( empty( $idx_queue ) ) {
-			$wpdb->query( "DELETE q1 FROM `{$table_queue}` q1 INNER JOIN `{$table_queue}` q2 WHERE q1.id < q2.id AND q1.post_id = q2.post_id AND q1.original_url = q2.original_url" );
-			$res_idx = $wpdb->query( "ALTER TABLE `{$table_queue}` ADD UNIQUE KEY uq_post_orig (post_id, original_url(191))" );
+		// Column migrations on queue table
+		$has_url_hash = $wpdb->get_results( "SHOW COLUMNS FROM `{$table_queue}` LIKE 'url_hash'" );
+		if ( empty( $has_url_hash ) ) {
+			$wpdb->query( "ALTER TABLE `{$table_queue}` ADD COLUMN `url_hash` varchar(64) NOT NULL DEFAULT '' AFTER `original_url`" );
+		}
+		$has_owner_token = $wpdb->get_results( "SHOW COLUMNS FROM `{$table_queue}` LIKE 'owner_token'" );
+		if ( empty( $has_owner_token ) ) {
+			$wpdb->query( "ALTER TABLE `{$table_queue}` ADD COLUMN `owner_token` varchar(64) NOT NULL DEFAULT '' AFTER `status`" );
+		}
+
+		// Ensure all existing rows have valid 64-char SHA-256 url_hash
+		$wpdb->query( "UPDATE `{$table_queue}` SET `url_hash` = SHA2(`original_url`, 256) WHERE `url_hash` = '' OR `url_hash` IS NULL" );
+
+		// Ensure full 256-bit binary-safe UNIQUE KEY uq_post_urlhash (archive duplicates safely first)
+		$idx_urlhash = $wpdb->get_results( "SHOW INDEX FROM `{$table_queue}` WHERE Key_name = 'uq_post_urlhash'" );
+		if ( empty( $idx_urlhash ) ) {
+			$now_utc = current_time( 'mysql', true );
+			// Safely preserve historical duplicates in archive table prior to unique key
+			$wpdb->query( "INSERT IGNORE INTO `{$table_archive}` 
+			               (original_queue_id, post_id, original_url, url_hash, filecode, mode, server_name, language, quality, state, retry_count, error_msg, original_repeatable, created_at, updated_at, archived_at, status, owner_token)
+			               SELECT q1.id, q1.post_id, q1.original_url, q1.url_hash, q1.filecode, q1.mode, q1.server_name, q1.language, q1.quality, q1.state, q1.retry_count, q1.error_msg, q1.original_repeatable, q1.created_at, q1.updated_at, '{$now_utc}', q1.status, q1.owner_token
+			               FROM `{$table_queue}` q1
+			               INNER JOIN `{$table_queue}` q2
+			               WHERE q1.id < q2.id AND q1.post_id = q2.post_id AND ( (q1.url_hash != '' AND q1.url_hash = q2.url_hash) OR q1.original_url = q2.original_url )" );
+
+			// Remove duplicate older entries from active queue
+			$wpdb->query( "DELETE q1 FROM `{$table_queue}` q1
+			               INNER JOIN `{$table_queue}` q2
+			               WHERE q1.id < q2.id AND q1.post_id = q2.post_id AND ( (q1.url_hash != '' AND q1.url_hash = q2.url_hash) OR q1.original_url = q2.original_url )" );
+
+			// Drop legacy prefix-truncated index if present
+			$wpdb->query( "ALTER TABLE `{$table_queue}` DROP INDEX uq_post_orig" );
+			$res_idx = $wpdb->query( "ALTER TABLE `{$table_queue}` ADD UNIQUE KEY uq_post_urlhash (post_id, url_hash)" );
 			if ( false === $res_idx ) {
 				return false;
 			}
@@ -206,8 +264,8 @@ final class PeeStream_Plugin {
 			$wpdb->query( "UPDATE `{$table_backups}` SET `mode` = 'unknown' WHERE `mode` = 'replace' AND `backup_time` < '" . current_time( 'mysql', true ) . "'" );
 		}
 
-		// Strict verification of all mandatory columns and UNIQUE indexes across all 3 tables
-		$expected_queue_cols = array( 'id', 'post_id', 'original_url', 'filecode', 'mode', 'server_name', 'language', 'quality', 'state', 'retry_count', 'error_msg', 'original_repeatable', 'created_at', 'updated_at', 'status' );
+		// Strict verification of all mandatory columns and UNIQUE indexes across all tables
+		$expected_queue_cols = array( 'id', 'post_id', 'original_url', 'url_hash', 'filecode', 'mode', 'server_name', 'language', 'quality', 'state', 'retry_count', 'error_msg', 'original_repeatable', 'created_at', 'updated_at', 'status', 'owner_token' );
 		$actual_queue_cols = $wpdb->get_col( "SHOW COLUMNS FROM `{$table_queue}`" );
 		foreach ( $expected_queue_cols as $c ) {
 			if ( ! in_array( $c, (array) $actual_queue_cols, true ) ) {
@@ -231,11 +289,19 @@ final class PeeStream_Plugin {
 			}
 		}
 
+		$expected_archive_cols = array( 'id', 'original_queue_id', 'post_id', 'original_url', 'url_hash', 'filecode', 'mode', 'server_name', 'language', 'quality', 'state', 'retry_count', 'error_msg', 'original_repeatable', 'created_at', 'updated_at', 'archived_at', 'status', 'owner_token' );
+		$actual_archive_cols = $wpdb->get_col( "SHOW COLUMNS FROM `{$table_archive}`" );
+		foreach ( $expected_archive_cols as $c ) {
+			if ( ! in_array( $c, (array) $actual_archive_cols, true ) ) {
+				return false;
+			}
+		}
+
 		$wh_idx = $wpdb->get_results( "SHOW INDEX FROM `{$table_webhooks}` WHERE Key_name = 'uq_fc_event'" );
 		if ( empty( $wh_idx ) ) {
 			return false;
 		}
-		$q_idx = $wpdb->get_results( "SHOW INDEX FROM `{$table_queue}` WHERE Key_name = 'uq_post_orig'" );
+		$q_idx = $wpdb->get_results( "SHOW INDEX FROM `{$table_queue}` WHERE Key_name = 'uq_post_urlhash'" );
 		if ( empty( $q_idx ) ) {
 			return false;
 		}
@@ -285,6 +351,12 @@ register_deactivation_hook( __FILE__, array( 'PeeStream_Plugin', 'deactivate' ) 
 
 function peestream_run() {
 	return PeeStream_Plugin::get_instance();
+}
+
+if ( ! function_exists( 'peestream_url_hash' ) ) {
+	function peestream_url_hash( $url ) {
+		return hash( 'sha256', trim( (string) $url ) );
+	}
 }
 
 peestream_run();

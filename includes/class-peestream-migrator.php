@@ -105,6 +105,13 @@ class PeeStream_Migrator {
 	}
 
 	/**
+	 * Full 256-bit binary-safe SHA-256 hash helper for case-sensitive, collision-free URL indexing
+	 */
+	public static function url_hash( $url ) {
+		return hash( 'sha256', trim( (string) $url ) );
+	}
+
+	/**
 	 * Detect if URL belongs to confirmed competitor hoster using strict hostname validation
 	 */
 	public function detect_confirmed_hoster( $url ) {
@@ -451,6 +458,10 @@ class PeeStream_Migrator {
 
 		$logs = array();
 		$processed_count = 0;
+		$completed_count = 0;
+		$pending_count   = 0;
+		$failed_count    = 0;
+		$skipped_count   = 0;
 
 		try {
 			foreach ( $post_ids as $p_id ) {
@@ -505,12 +516,15 @@ class PeeStream_Migrator {
 					}
 					$url      = $lp['url'];
 					$detected = $lp['detected'];
+					$url_hash = self::url_hash( $url );
+					$worker_token = ( ! empty( $lock_token ) && is_string( $lock_token ) ) ? $lock_token : ( self::$owner_token ?: wp_generate_password( 32, false ) );
 
 					// Check if already in persistent queue
 					$existing_queue = $wpdb->get_row(
 						$wpdb->prepare(
-							"SELECT * FROM {$table_queue} WHERE post_id = %d AND original_url = %s",
+							"SELECT * FROM {$table_queue} WHERE post_id = %d AND (url_hash = %s OR original_url = %s)",
 							$p_id,
+							$url_hash,
 							$url
 						),
 						ARRAY_A
@@ -524,12 +538,30 @@ class PeeStream_Migrator {
 						$queue_id = (int) $existing_queue['id'];
 						$filecode = $existing_queue['filecode'];
 						if ( 'completed' === $existing_queue['status'] ) {
+							$skipped_count++;
 							$logs[] = sprintf( '[SKIP] Post #%d: Link %s already successfully migrated (filecode: %s).', $p_id, esc_html( $url ), $filecode );
 							continue;
 						}
 
 						if ( empty( $filecode ) || 'failed' === $existing_queue['status'] ) {
 							$filecode = '';
+							// Attempt atomic claim before retrying upload
+							$claimed = $wpdb->query( $wpdb->prepare(
+								"UPDATE {$table_queue} 
+								 SET owner_token = %s, status = 'checking', state = 'uploading', updated_at = %s 
+								 WHERE id = %d 
+								   AND (owner_token = '' OR owner_token = %s OR updated_at < %s)",
+								$worker_token,
+								current_time( 'mysql', true ),
+								$queue_id,
+								$worker_token,
+								gmdate( 'Y-m-d H:i:s', time() - 120 )
+							) );
+							if ( ! $claimed ) {
+								$failed_count++;
+								$logs[] = sprintf( '[BUSY] Post #%d: Queue item for %s is locked by another process or busy. Deferring.', $p_id, esc_html( $url ) );
+								continue;
+							}
 						} else {
 							// Poll status from PeeStream API
 							$status_info = $this->query_file_info( $api_domain, $api_key, $filecode );
@@ -545,6 +577,7 @@ class PeeStream_Migrator {
 									),
 									array( 'id' => $queue_id )
 								);
+								$pending_count++;
 								$logs[] = sprintf( '[PENDING] Post #%d: File %s still processing (%s). Original link untouched.', $p_id, $filecode, $cur_state );
 								continue;
 							}
@@ -556,36 +589,65 @@ class PeeStream_Migrator {
 						if ( ! $existing_queue ) {
 							$inserted = $wpdb->query( $wpdb->prepare(
 								"INSERT INTO {$table_queue} 
-								 (post_id, original_url, filecode, mode, server_name, language, quality, state, status, retry_count, error_msg, original_repeatable, created_at, updated_at)
-								 VALUES (%d, %s, '', %s, %s, %s, %s, 'uploading', 'checking', 0, '', %s, %s, %s)",
+								 (post_id, original_url, url_hash, filecode, mode, server_name, language, quality, state, status, owner_token, retry_count, error_msg, original_repeatable, created_at, updated_at)
+								 VALUES (%d, %s, %s, '', %s, %s, %s, %s, 'uploading', 'checking', %s, 0, '', %s, %s, %s)",
 								$p_id,
 								$url,
+								$url_hash,
 								$mode,
 								$server_name,
 								$language,
 								$quality,
+								$worker_token,
 								maybe_serialize( $meta ),
 								current_time( 'mysql', true ),
 								current_time( 'mysql', true )
 							) );
 
 							if ( false === $inserted ) {
-								// Duplicate collision! Check existing record
+								// Duplicate collision or DB error! Check existing record
 								$existing_queue = $wpdb->get_row(
 									$wpdb->prepare(
-										"SELECT * FROM {$table_queue} WHERE post_id = %d AND original_url = %s",
+										"SELECT * FROM {$table_queue} WHERE post_id = %d AND (url_hash = %s OR original_url = %s)",
 										$p_id,
+										$url_hash,
 										$url
 									),
 									ARRAY_A
 								);
-								if ( $existing_queue && 'completed' === $existing_queue['status'] ) {
-									$logs[] = sprintf( '[SKIP] Post #%d: Link %s already migrated.', $p_id, esc_html( $url ) );
-									continue;
-								}
-								if ( $existing_queue && ! empty( $existing_queue['filecode'] ) ) {
-									$filecode = $existing_queue['filecode'];
+								if ( $existing_queue ) {
 									$queue_id = (int) $existing_queue['id'];
+									if ( 'completed' === $existing_queue['status'] ) {
+										$skipped_count++;
+										$logs[] = sprintf( '[SKIP] Post #%d: Link %s already migrated.', $p_id, esc_html( $url ) );
+										continue;
+									}
+									if ( ! empty( $existing_queue['filecode'] ) && 'failed' !== $existing_queue['status'] ) {
+										$filecode = $existing_queue['filecode'];
+									} else {
+										// Attempt atomic claim
+										$claimed = $wpdb->query( $wpdb->prepare(
+											"UPDATE {$table_queue} 
+											 SET owner_token = %s, status = 'checking', state = 'uploading', updated_at = %s 
+											 WHERE id = %d 
+											   AND (owner_token = '' OR owner_token = %s OR updated_at < %s)",
+											$worker_token,
+											current_time( 'mysql', true ),
+											$queue_id,
+											$worker_token,
+											gmdate( 'Y-m-d H:i:s', time() - 120 )
+										) );
+										if ( ! $claimed ) {
+											$failed_count++;
+											$logs[] = sprintf( '[BUSY] Post #%d: Queue collision for %s, row locked by another worker. Deferring.', $p_id, esc_html( $url ) );
+											continue; // HALT upload!
+										}
+									}
+								} else {
+									// Pre-reservation failed and no existing row found! HALT upload!
+									$failed_count++;
+									$logs[] = sprintf( '[ERROR] Post #%d: Queue pre-reservation DB failure for %s. Upload aborted.', $p_id, esc_html( $url ) );
+									continue; // HALT upload!
 								}
 							} else {
 								$queue_id = (int) $wpdb->insert_id;
@@ -620,6 +682,7 @@ class PeeStream_Migrator {
 										array( 'id' => $queue_id )
 									);
 								}
+								$failed_count++;
 								$logs[] = sprintf( '[ERROR] Post #%d: Remote upload network error: %s', $p_id, $res->get_error_message() );
 								continue;
 							}
@@ -639,6 +702,7 @@ class PeeStream_Migrator {
 										array( 'id' => $queue_id )
 									);
 								}
+								$failed_count++;
 								$logs[] = sprintf( '[FAIL] Post #%d: Could not queue %s (%s). Original link preserved.', $p_id, esc_html( $url ), $err_msg );
 								continue;
 							}
@@ -657,6 +721,7 @@ class PeeStream_Migrator {
 										array( 'id' => $queue_id )
 									);
 								}
+								$failed_count++;
 								$logs[] = sprintf( '[FAIL] Post #%d: Missing filecode for %s.', $p_id, esc_html( $url ) );
 								continue;
 							}
@@ -679,6 +744,7 @@ class PeeStream_Migrator {
 									array(
 										'post_id'             => $p_id,
 										'original_url'        => $url,
+										'url_hash'            => $url_hash,
 										'filecode'            => $filecode,
 										'mode'                => $mode,
 										'server_name'         => $server_name,
@@ -686,6 +752,7 @@ class PeeStream_Migrator {
 										'quality'             => $quality,
 										'state'               => 'pending',
 										'status'              => 'pending',
+										'owner_token'         => $worker_token,
 										'original_repeatable' => maybe_serialize( $meta ),
 										'created_at'          => current_time( 'mysql', true ),
 										'updated_at'          => current_time( 'mysql', true ),
@@ -700,6 +767,7 @@ class PeeStream_Migrator {
 								$is_ready = true;
 							} else {
 								$cur_state = ( $status_info && isset( $status_info['state'] ) ) ? $status_info['state'] : 'pending';
+								$pending_count++;
 								$logs[] = sprintf( '[QUEUED] Post #%d: File %s queued on PeeStream (%s). Original link untouched until ready.', $p_id, $filecode, $cur_state );
 								continue;
 							}
@@ -736,8 +804,9 @@ class PeeStream_Migrator {
 									'status'     => 'completed',
 									'updated_at' => current_time( 'mysql', true ),
 								),
-								array( 'post_id' => $p_id, 'original_url' => $url )
+								array( 'id' => $queue_id )
 							);
+							$skipped_count++;
 							$logs[] = sprintf( '[ALREADY PRESENT] Post #%d: Player %s already present in post.', $p_id, $filecode );
 							continue;
 						}
@@ -760,8 +829,9 @@ class PeeStream_Migrator {
 									'error_msg'  => 'Original server URL modified or deleted by editor in interim. Modification aborted.',
 									'updated_at' => current_time( 'mysql', true ),
 								),
-								array( 'post_id' => $p_id, 'original_url' => $url )
+								array( 'id' => $queue_id )
 							);
+							$failed_count++;
 							$logs[] = sprintf( '[CONFLICT] Post #%d: Original server (%s) was changed or deleted by editor. Modification aborted.', $p_id, esc_html( $url ) );
 							continue;
 						}
@@ -781,6 +851,17 @@ class PeeStream_Migrator {
 						);
 
 						if ( false === $ins_b || empty( $wpdb->insert_id ) ) {
+							$wpdb->update(
+								$table_queue,
+								array(
+									'state'      => 'failed',
+									'status'     => 'failed',
+									'error_msg'  => 'Could not save backup snapshot. Post modification aborted for safety.',
+									'updated_at' => current_time( 'mysql', true ),
+								),
+								array( 'id' => $queue_id )
+							);
+							$failed_count++;
 							$logs[] = sprintf( '[ERROR] Post #%d: Could not save backup snapshot. Post modification aborted for safety.', $p_id );
 							continue;
 						}
@@ -825,20 +906,44 @@ class PeeStream_Migrator {
 								array( 'status' => 'completed' ),
 								array( 'id' => $link_backup_id )
 							);
-							$wpdb->update(
-								$table_queue,
-								array(
-									'state'      => 'ready',
-									'status'     => 'completed',
-									'updated_at' => current_time( 'mysql', true ),
-								),
-								array( 'post_id' => $p_id, 'original_url' => $url )
-							);
-							$processed_count++;
-							if ( 'replace' === $mode ) {
-								$logs[] = sprintf( '[READY - REPLACED] Post #%d: Replaced %s with PeeStream %s (canplay=1).', $p_id, $detected['name'], $filecode );
+
+							// Strict verification: verify backup status was updated to completed in DB
+							$fresh_b_status = $wpdb->get_var( $wpdb->prepare(
+								"SELECT status FROM {$table_backups} WHERE id = %d",
+								$link_backup_id
+							) );
+
+							if ( 'completed' === $fresh_b_status ) {
+								$wpdb->update(
+									$table_queue,
+									array(
+										'state'      => 'ready',
+										'status'     => 'completed',
+										'updated_at' => current_time( 'mysql', true ),
+									),
+									array( 'id' => $queue_id )
+								);
+								$processed_count++;
+								$completed_count++;
+								if ( 'replace' === $mode ) {
+									$logs[] = sprintf( '[READY - REPLACED] Post #%d: Replaced %s with PeeStream %s (canplay=1).', $p_id, $detected['name'], $filecode );
+								} else {
+									$logs[] = sprintf( '[READY - PRIMARY] Post #%d: PeeStream %s attached as Server 1. Original %s retained as fallback.', $p_id, $filecode, $detected['name'] );
+								}
 							} else {
-								$logs[] = sprintf( '[READY - PRIMARY] Post #%d: PeeStream %s attached as Server 1. Original %s retained as fallback.', $p_id, $filecode, $detected['name'] );
+								// Backup record status failed verification!
+								$wpdb->update(
+									$table_queue,
+									array(
+										'state'      => 'apply_failed',
+										'status'     => 'failed',
+										'error_msg'  => 'Failed to verify backup status promotion to completed.',
+										'updated_at' => current_time( 'mysql', true ),
+									),
+									array( 'id' => $queue_id )
+								);
+								$failed_count++;
+								$logs[] = sprintf( '[ERROR] Post #%d: Backup status verification failed. Queue marked failed.', $p_id );
 							}
 						} else {
 							$wpdb->update(
@@ -854,8 +959,9 @@ class PeeStream_Migrator {
 									'error_msg'  => 'Failed to verify repeatable_fields post meta update. Post preserved.',
 									'updated_at' => current_time( 'mysql', true ),
 								),
-								array( 'post_id' => $p_id, 'original_url' => $url )
+								array( 'id' => $queue_id )
 							);
+							$failed_count++;
 							$logs[] = sprintf( '[ERROR] Post #%d: Could not verify repeatable_fields post meta update. Queue marked failed.', $p_id );
 						}
 					}
@@ -868,7 +974,11 @@ class PeeStream_Migrator {
 		}
 
 		wp_send_json_success( array(
-			'processed_count' => $processed_count,
+			'processed_count' => $completed_count,
+			'completed_count' => $completed_count,
+			'pending_count'   => $pending_count,
+			'failed_count'    => $failed_count,
+			'skipped_count'   => $skipped_count,
 			'logs'            => $logs,
 		) );
 	}
@@ -1200,24 +1310,47 @@ class PeeStream_Migrator {
 					$is_saved = ( $fresh_meta === $meta_to_save );
 
 					if ( $is_saved ) {
+						$backup_verified = true;
 						if ( $backup_id > 0 ) {
 							$wpdb->update(
 								$table_backups,
 								array( 'status' => 'completed' ),
 								array( 'id' => $backup_id )
 							);
+							$fresh_b_status = $wpdb->get_var( $wpdb->prepare(
+								"SELECT status FROM {$table_backups} WHERE id = %d",
+								$backup_id
+							) );
+							if ( 'completed' !== $fresh_b_status ) {
+								$backup_verified = false;
+							}
 						}
-						$wpdb->update(
-							$table_queue,
-							array(
-								'state'      => 'ready',
-								'status'     => 'completed',
-								'updated_at' => current_time( 'mysql', true ),
-							),
-							array( 'id' => (int) $item['id'] )
-						);
-						$updated_count++;
-						$logs[] = sprintf( '[READY] Post #%d: Video %s is ready! PeeStream player attached (Strategy: %s).', $p_id, $filecode, $mode );
+
+						if ( $backup_verified ) {
+							$wpdb->update(
+								$table_queue,
+								array(
+									'state'      => 'ready',
+									'status'     => 'completed',
+									'updated_at' => current_time( 'mysql', true ),
+								),
+								array( 'id' => (int) $item['id'] )
+							);
+							$updated_count++;
+							$logs[] = sprintf( '[READY] Post #%d: Video %s is ready! PeeStream player attached (Strategy: %s).', $p_id, $filecode, $mode );
+						} else {
+							$wpdb->update(
+								$table_queue,
+								array(
+									'state'      => 'apply_failed',
+									'status'     => 'failed',
+									'error_msg'  => 'Failed to verify backup status promotion to completed.',
+									'updated_at' => current_time( 'mysql', true ),
+								),
+								array( 'id' => (int) $item['id'] )
+							);
+							$logs[] = sprintf( '[ERROR] Post #%d: Backup status verification failed. Queue marked failed.', $p_id );
+						}
 					} else {
 						// Post meta update failed verification: mark backup and queue failed without falsely completing
 						if ( $backup_id > 0 ) {
@@ -1418,14 +1551,27 @@ class PeeStream_Migrator {
 				}
 			}
 
+			$url_hash = self::url_hash( $orig_url );
 			if ( $has_player ) {
 				// Post modification was actually completed before interruption
 				$wpdb->update( $table_backups, array( 'status' => 'completed' ), array( 'id' => (int) $b['id'] ) );
-				$wpdb->update( $table_queue, array( 'status' => 'completed', 'state' => 'ready', 'updated_at' => current_time( 'mysql', true ) ), array( 'post_id' => $post_id, 'original_url' => $orig_url ) );
+				$wpdb->query( $wpdb->prepare(
+					"UPDATE {$table_queue} SET status = 'completed', state = 'ready', updated_at = %s WHERE post_id = %d AND (url_hash = %s OR original_url = %s)",
+					current_time( 'mysql', true ),
+					$post_id,
+					$url_hash,
+					$orig_url
+				) );
 			} else {
 				// Post modification was interrupted or failed: mark backup as apply_failed and queue as pending for safe retry
 				$wpdb->update( $table_backups, array( 'status' => 'apply_failed' ), array( 'id' => (int) $b['id'] ) );
-				$wpdb->update( $table_queue, array( 'status' => 'pending', 'error_msg' => 'Recovered from interrupted partial update', 'updated_at' => current_time( 'mysql', true ) ), array( 'post_id' => $post_id, 'original_url' => $orig_url ) );
+				$wpdb->query( $wpdb->prepare(
+					"UPDATE {$table_queue} SET status = 'pending', error_msg = 'Recovered from interrupted partial update', updated_at = %s WHERE post_id = %d AND (url_hash = %s OR original_url = %s)",
+					current_time( 'mysql', true ),
+					$post_id,
+					$url_hash,
+					$orig_url
+				) );
 			}
 		}
 	}

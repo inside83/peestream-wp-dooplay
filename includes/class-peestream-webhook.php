@@ -34,6 +34,7 @@ class PeeStream_Webhook {
 	}
 
 	public function verify_permission( WP_REST_Request $request ) {
+		$this->options = get_option( 'peestream_settings', array() );
 		$configured_secret = ! empty( $this->options['webhook_secret'] ) ? trim( (string) $this->options['webhook_secret'] ) : '';
 
 		// Fail-closed: Reject if secret is missing or too weak (< 16 chars)
@@ -62,6 +63,7 @@ class PeeStream_Webhook {
 	}
 
 	public function handle_webhook( WP_REST_Request $request ) {
+		$this->options = get_option( 'peestream_settings', array() );
 		// Strict POST check
 		if ( 'POST' !== strtoupper( (string) $request->get_method() ) ) {
 			return new WP_REST_Response( array(
@@ -409,20 +411,35 @@ class PeeStream_Webhook {
 				) );
 			}
 
-			if ( ! $existing_draft_id ) {
-				$existing_draft_id = (int) $wpdb->get_var( $wpdb->prepare(
-					"SELECT ID FROM {$wpdb->posts} WHERE post_type = 'episodes' AND post_title = %s AND post_status = 'draft' ORDER BY ID DESC LIMIT 1",
-					$ep_post_title
-				) );
+			// Strict validation: Re-use draft ONLY if it strictly belongs to this show, season, and episode!
+			// Never recover draft purely by title to prevent cross-show/cross-episode clobbering
+			if ( $existing_draft_id > 0 ) {
+				$draft_post = get_post( $existing_draft_id );
+				if ( ! $draft_post || $draft_post->post_type !== 'episodes' ) {
+					$existing_draft_id = 0;
+				} else {
+					$draft_season = get_post_meta( $existing_draft_id, 'temporada', true );
+					$draft_episode = get_post_meta( $existing_draft_id, 'episodio', true );
+					$draft_ids = get_post_meta( $existing_draft_id, 'ids', true );
+					if ( ( $draft_season !== '' && (int) $draft_season !== (int) $season ) ||
+					     ( $draft_episode !== '' && (int) $draft_episode !== (int) $episode ) ||
+					     ( ! empty( $imdb_id ) && ! empty( $draft_ids ) && $draft_ids !== $imdb_id ) ) {
+						$existing_draft_id = 0; // Mismatched draft rejected
+					}
+				}
 			}
 
 			$new_post_id = 0;
+			$is_new_transaction = false;
 
-			if ( $existing_draft_id > 0 && get_post( $existing_draft_id ) ) {
-				// Re-use existing draft post from interrupted attempt (zero duplicate post creation!)
+			if ( $existing_draft_id > 0 ) {
+				// Re-use verified existing draft post from interrupted attempt (zero duplicate post creation!)
 				$new_post_id = $existing_draft_id;
 			} else {
 				$author_id = $this->get_default_author_id();
+
+				$wpdb->query( 'START TRANSACTION' );
+				$is_new_transaction = true;
 
 				$new_post_id = wp_insert_post( array(
 					'post_title'   => $ep_post_title,
@@ -433,19 +450,24 @@ class PeeStream_Webhook {
 					'meta_input'   => array(
 						'_peestream_webhook_filecode' => $file_code,
 						'_peestream_webhook_event'    => $event,
+						'temporada'                   => $season,
+						'episodio'                    => $episode,
+						'serie'                       => $show_name,
 					),
-				) );
+				), true );
 
-				if ( is_wp_error( $new_post_id ) ) {
+				if ( empty( $new_post_id ) || is_wp_error( $new_post_id ) ) {
+					$wpdb->query( 'ROLLBACK' );
+					$err_msg = is_wp_error( $new_post_id ) ? $new_post_id->get_error_message() : 'Episode creation failed (returned ID 0).';
 					$wpdb->update(
 						$table_webhooks,
 						array( 'status' => 'failed', 'received_at' => $now_date ),
 						array( 'file_code' => $file_code, 'event' => $event )
 					);
-					return new WP_REST_Response( array( 'success' => false, 'error' => $new_post_id->get_error_message() ), 500 );
+					return new WP_REST_Response( array( 'success' => false, 'error' => $err_msg ), 500 );
 				}
 
-				// Immediately link post ID to webhook audit record
+				// Immediately link post ID to webhook audit record inside atomic transaction
 				$wpdb->update(
 					$table_webhooks,
 					array( 'post_id' => $new_post_id ),
@@ -466,12 +488,19 @@ class PeeStream_Webhook {
 
 			$attached = $this->attach_server_to_post( $new_post_id, $server_entry, $file_code, $embed_url );
 			if ( ! $attached ) {
+				if ( $is_new_transaction ) {
+					$wpdb->query( 'ROLLBACK' );
+				}
 				$wpdb->update(
 					$table_webhooks,
 					array( 'status' => 'failed', 'received_at' => $now_date ),
 					array( 'file_code' => $file_code, 'event' => $event )
 				);
 				return new WP_REST_Response( array( 'success' => false, 'error' => 'Failed to persist repeatable_fields to new episode draft.' ), 500 );
+			}
+
+			if ( $is_new_transaction ) {
+				$wpdb->query( 'COMMIT' );
 			}
 
 			$wpdb->update(
@@ -616,26 +645,50 @@ class PeeStream_Webhook {
 				$existing_draft_id = (int) $wpdb->get_var( $wpdb->prepare(
 					"SELECT p.ID FROM {$wpdb->posts} p
 					 INNER JOIN {$wpdb->postmeta} pm ON (p.ID = pm.post_id AND pm.meta_key = '_peestream_webhook_filecode')
-					 WHERE pm.meta_value = %s AND p.post_status = 'draft' LIMIT 1",
-					$file_code
+					 WHERE pm.meta_value = %s AND p.post_type = %s AND p.post_status = 'draft' LIMIT 1",
+					$file_code,
+					$target_cpt
 				) );
 			}
 
-			if ( ! $existing_draft_id ) {
-				$existing_draft_id = (int) $wpdb->get_var( $wpdb->prepare(
-					"SELECT ID FROM {$wpdb->posts} WHERE post_type = %s AND post_title = %s AND post_status = 'draft' ORDER BY ID DESC LIMIT 1",
-					$target_cpt,
-					$title
-				) );
+			// Strict validation: Re-use draft ONLY if it strictly belongs to this movie/CPT!
+			// Never recover draft purely by title to prevent cross-movie clobbering (two movies with identical titles)
+			if ( $existing_draft_id > 0 ) {
+				$draft_post = get_post( $existing_draft_id );
+				if ( ! $draft_post || $draft_post->post_type !== $target_cpt ) {
+					$existing_draft_id = 0;
+				} else {
+					if ( ! empty( $imdb_id ) ) {
+						$draft_imdb = get_post_meta( $existing_draft_id, 'ids', true );
+						if ( empty( $draft_imdb ) ) {
+							$draft_imdb = get_post_meta( $existing_draft_id, 'imdb_id', true );
+						}
+						if ( ! empty( $draft_imdb ) && $draft_imdb !== $imdb_id ) {
+							$existing_draft_id = 0; // Mismatched draft rejected
+						}
+					}
+				}
 			}
 
 			$new_post_id = 0;
+			$is_new_transaction = false;
 
-			if ( $existing_draft_id > 0 && get_post( $existing_draft_id ) ) {
-				// Re-use existing draft post from interrupted attempt (zero duplicate post creation!)
+			if ( $existing_draft_id > 0 ) {
+				// Re-use verified existing draft post from interrupted attempt (zero duplicate post creation!)
 				$new_post_id = $existing_draft_id;
 			} else {
 				$author_id  = $this->get_default_author_id();
+
+				$wpdb->query( 'START TRANSACTION' );
+				$is_new_transaction = true;
+
+				$meta_input = array(
+					'_peestream_webhook_filecode' => $file_code,
+					'_peestream_webhook_event'    => $event,
+				);
+				if ( ! empty( $imdb_id ) ) {
+					$meta_input['ids'] = $imdb_id;
+				}
 
 				$new_post_id = wp_insert_post( array(
 					'post_title'   => $title,
@@ -643,22 +696,21 @@ class PeeStream_Webhook {
 					'post_status'  => 'draft',
 					'post_type'    => $target_cpt,
 					'post_author'  => $author_id,
-					'meta_input'   => array(
-						'_peestream_webhook_filecode' => $file_code,
-						'_peestream_webhook_event'    => $event,
-					),
-				) );
+					'meta_input'   => $meta_input,
+				), true );
 
-				if ( is_wp_error( $new_post_id ) ) {
+				if ( empty( $new_post_id ) || is_wp_error( $new_post_id ) ) {
+					$wpdb->query( 'ROLLBACK' );
+					$err_msg = is_wp_error( $new_post_id ) ? $new_post_id->get_error_message() : 'Movie creation failed (returned ID 0).';
 					$wpdb->update(
 						$table_webhooks,
 						array( 'status' => 'failed', 'received_at' => $now_date ),
 						array( 'file_code' => $file_code, 'event' => $event )
 					);
-					return new WP_REST_Response( array( 'success' => false, 'error' => $new_post_id->get_error_message() ), 500 );
+					return new WP_REST_Response( array( 'success' => false, 'error' => $err_msg ), 500 );
 				}
 
-				// Immediately link post ID to webhook audit record
+				// Immediately link post ID to webhook audit record inside atomic transaction
 				$wpdb->update(
 					$table_webhooks,
 					array( 'post_id' => $new_post_id ),
@@ -675,12 +727,19 @@ class PeeStream_Webhook {
 
 			$attached = $this->attach_server_to_post( $new_post_id, $server_entry, $file_code, $embed_url );
 			if ( ! $attached ) {
+				if ( $is_new_transaction ) {
+					$wpdb->query( 'ROLLBACK' );
+				}
 				$wpdb->update(
 					$table_webhooks,
 					array( 'status' => 'failed', 'received_at' => $now_date ),
 					array( 'file_code' => $file_code, 'event' => $event )
 				);
 				return new WP_REST_Response( array( 'success' => false, 'error' => 'Failed to persist repeatable_fields to new movie draft.' ), 500 );
+			}
+
+			if ( $is_new_transaction ) {
+				$wpdb->query( 'COMMIT' );
 			}
 
 			$wpdb->update(

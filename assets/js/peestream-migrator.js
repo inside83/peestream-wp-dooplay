@@ -117,6 +117,12 @@
 			});
 		}
 
+		var totalCompleted = 0;
+		var totalPending = 0;
+		var totalFailed = 0;
+		var totalSkipped = 0;
+		var totalBatchErrors = 0;
+
 		// 2. Start Migration Loop
 		$btnStart.on('click', function(e) {
 			e.preventDefault();
@@ -129,6 +135,11 @@
 
 			isMigrating = true;
 			currentIndex = 0;
+			totalCompleted = 0;
+			totalPending = 0;
+			totalFailed = 0;
+			totalSkipped = 0;
+			totalBatchErrors = 0;
 			$btnStart.prop('disabled', true);
 			$btnScan.prop('disabled', true);
 			$progressContainer.slideDown();
@@ -172,7 +183,12 @@
 								log(l);
 							});
 						}
+						totalCompleted += parseInt(res.data.completed_count || 0, 10);
+						totalPending   += parseInt(res.data.pending_count || 0, 10);
+						totalFailed    += parseInt(res.data.failed_count || 0, 10);
+						totalSkipped   += parseInt(res.data.skipped_count || 0, 10);
 					} else {
+						totalBatchErrors++;
 						log('[ERROR] Batch failed: ' + ((res.data && res.data.message) ? res.data.message : 'Unknown error'));
 					}
 
@@ -182,6 +198,7 @@
 					}, 250);
 				},
 				error: function(xhr, status, err) {
+					totalBatchErrors++;
 					log('[ERROR] AJAX network error in batch: ' + err);
 					currentIndex += batchSize;
 					setTimeout(function() {
@@ -195,10 +212,28 @@
 			isMigrating = false;
 			$progressBar.css('width', '100%');
 			$progressPercent.text('100%');
-			$progressStatus.text(isDryRun ? 'Dry run finished!' : 'Batch migration complete!');
 			$btnScan.prop('disabled', false);
 			$btnStart.prop('disabled', false);
-			log('=== [FINISHED] ' + (isDryRun ? 'Dry run preview completed.' : 'All candidate posts processed successfully.') + ' ===');
+
+			if (isDryRun) {
+				$progressStatus.text('Dry run finished!');
+				log('=== [FINISHED] Dry run preview completed. ===');
+				return;
+			}
+
+			var summary = 'Processed: ' + totalCompleted + ' completed, ' +
+			              totalPending + ' pending encoding, ' +
+			              totalSkipped + ' skipped, ' +
+			              totalFailed + ' failed/conflict' +
+			              (totalBatchErrors > 0 ? (', ' + totalBatchErrors + ' batch errors') : '') + '.';
+
+			if (totalFailed > 0 || totalBatchErrors > 0) {
+				$progressStatus.text('Migration finished with issues. ' + summary);
+				log('=== [FINISHED WITH ISSUES] ' + summary + ' ===');
+			} else {
+				$progressStatus.text('Batch migration complete! ' + summary);
+				log('=== [FINISHED] All candidate posts processed successfully. ' + summary + ' ===');
+			}
 		}
 
 		// 3. Check Pending Encodings
