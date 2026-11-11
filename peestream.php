@@ -40,11 +40,15 @@ final class PeeStream_Plugin {
 		require_once PEESTREAM_PLUGIN_DIR . 'includes/class-peestream-admin.php';
 		require_once PEESTREAM_PLUGIN_DIR . 'includes/class-peestream-metabox.php';
 		require_once PEESTREAM_PLUGIN_DIR . 'includes/class-peestream-migrator.php';
+		require_once PEESTREAM_PLUGIN_DIR . 'includes/class-peestream-webhook.php';
 	}
 
 	private function init_hooks() {
 		add_action( 'init', array( $this, 'load_textdomain' ) );
 		
+		// Initialize REST API Webhook receiver
+		new PeeStream_Webhook();
+
 		if ( is_admin() ) {
 			new PeeStream_Admin();
 			new PeeStream_Metabox();
