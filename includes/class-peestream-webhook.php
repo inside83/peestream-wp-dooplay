@@ -207,24 +207,36 @@ class PeeStream_Webhook {
 
 		// 1. Strict Parent TV Show Matching (Must match verified IMDb ID or TMDb ID)
 		$parent_show_id = 0;
+		$matching_shows = array();
 
 		if ( ! empty( $imdb_id ) ) {
-			$parent_show_id = (int) $wpdb->get_var( $wpdb->prepare(
+			$matching_shows = $wpdb->get_col( $wpdb->prepare(
 				"SELECT p.ID FROM {$wpdb->posts} p
 				 INNER JOIN {$wpdb->postmeta} pm ON (p.ID = pm.post_id AND (pm.meta_key = 'ids' OR pm.meta_key = 'imdb_id'))
-				 WHERE p.post_type = 'tvshows' AND pm.meta_value = %s LIMIT 1",
+				 WHERE p.post_type = 'tvshows' AND pm.meta_value = %s",
 				$imdb_id
 			) );
 		}
 
-		if ( ! $parent_show_id && $tmdb_id > 0 ) {
-			$parent_show_id = (int) $wpdb->get_var( $wpdb->prepare(
+		if ( empty( $matching_shows ) && $tmdb_id > 0 ) {
+			$matching_shows = $wpdb->get_col( $wpdb->prepare(
 				"SELECT p.ID FROM {$wpdb->posts} p
 				 INNER JOIN {$wpdb->postmeta} pm ON (p.ID = pm.post_id AND (pm.meta_key = 'id' OR pm.meta_key = 'tmdb_id'))
-				 WHERE p.post_type = 'tvshows' AND pm.meta_value = %d LIMIT 1",
+				 WHERE p.post_type = 'tvshows' AND pm.meta_value = %d",
 				$tmdb_id
 			) );
 		}
+
+		// Ambiguity check for parent TV shows: multiple shows sharing the same ID must NOT be updated
+		if ( count( $matching_shows ) > 1 ) {
+			return new WP_REST_Response( array(
+				'success' => false,
+				'action'  => 'ambiguous_match',
+				'error'   => sprintf( 'Ambiguous match: %d TV shows share the same IMDb/TMDb identifier. Manual review required.', count( $matching_shows ) ),
+			), 409 );
+		}
+
+		$parent_show_id = ! empty( $matching_shows ) ? (int) $matching_shows[0] : 0;
 
 		// 2. Strict Episode Matching Within That Verified TV Show ONLY
 		$matched_ep_id = 0;
@@ -237,23 +249,36 @@ class PeeStream_Webhook {
 				INNER JOIN {$wpdb->postmeta} pm_s ON (p.ID = pm_s.post_id AND pm_s.meta_key = 'temporada' AND pm_s.meta_value = %d)
 				INNER JOIN {$wpdb->postmeta} pm_e ON (p.ID = pm_e.post_id AND pm_e.meta_key = 'episodio' AND pm_e.meta_value = %d)
 				INNER JOIN {$wpdb->postmeta} pm_p ON (p.ID = pm_p.post_id AND pm_p.meta_key = 'serie' AND (pm_p.meta_value = %s OR pm_p.meta_value = %s))
-				WHERE p.post_type = 'episodes' AND p.post_status IN ('publish', 'draft') LIMIT 1
+				WHERE p.post_type = 'episodes' AND p.post_status IN ('publish', 'draft')
 			";
 
-			$matched_ep_id = (int) $wpdb->get_var( $wpdb->prepare( $query, $season, $episode, $show_name, (string) $parent_show_id ) );
+			$matching_eps = $wpdb->get_col( $wpdb->prepare( $query, $season, $episode, $show_name, (string) $parent_show_id ) );
+
+			if ( count( $matching_eps ) > 1 ) {
+				return new WP_REST_Response( array(
+					'success' => false,
+					'action'  => 'ambiguous_match',
+					'error'   => sprintf( 'Ambiguous match: %d episodes share S%02dE%02d under TV show %s.', count( $matching_eps ), $season, $episode, esc_html( $show_name ) ),
+				), 409 );
+			}
+
+			$matched_ep_id = ! empty( $matching_eps ) ? (int) $matching_eps[0] : 0;
 		}
 
 		// A. Update Existing Verified Episode
 		if ( $matched_ep_id > 0 ) {
 			$this->attach_server_to_post( $matched_ep_id, $server_entry, $file_code, $embed_url );
 
-			$wpdb->insert( $table_webhooks, array(
-				'file_code'   => $file_code,
-				'event'       => $event,
-				'post_id'     => $matched_ep_id,
-				'ip'          => $client_ip,
-				'received_at' => $now_date,
-				'status'      => 'processed',
+			$wpdb->query( $wpdb->prepare(
+				"INSERT INTO {$table_webhooks} (file_code, event, post_id, ip, received_at, status)
+				 VALUES (%s, %s, %d, %s, %s, %s)
+				 ON DUPLICATE KEY UPDATE post_id = VALUES(post_id), ip = VALUES(ip), received_at = VALUES(received_at), status = VALUES(status)",
+				$file_code,
+				$event,
+				$matched_ep_id,
+				$client_ip,
+				$now_date,
+				'processed'
 			) );
 
 			return new WP_REST_Response( array(
@@ -296,13 +321,16 @@ class PeeStream_Webhook {
 
 			$this->attach_server_to_post( $new_post_id, $server_entry, $file_code, $embed_url );
 
-			$wpdb->insert( $table_webhooks, array(
-				'file_code'   => $file_code,
-				'event'       => $event,
-				'post_id'     => $new_post_id,
-				'ip'          => $client_ip,
-				'received_at' => $now_date,
-				'status'      => 'processed',
+			$wpdb->query( $wpdb->prepare(
+				"INSERT INTO {$table_webhooks} (file_code, event, post_id, ip, received_at, status)
+				 VALUES (%s, %s, %d, %s, %s, %s)
+				 ON DUPLICATE KEY UPDATE post_id = VALUES(post_id), ip = VALUES(ip), received_at = VALUES(received_at), status = VALUES(status)",
+				$file_code,
+				$event,
+				$new_post_id,
+				$client_ip,
+				$now_date,
+				'processed'
 			) );
 
 			return new WP_REST_Response( array(
@@ -315,13 +343,16 @@ class PeeStream_Webhook {
 		}
 
 		// C. Ambiguous / Unmatched: Audit and leave untouched
-		$wpdb->insert( $table_webhooks, array(
-			'file_code'   => $file_code,
-			'event'       => $event,
-			'post_id'     => 0,
-			'ip'          => $client_ip,
-			'received_at' => $now_date,
-			'status'      => 'unmatched',
+		$wpdb->query( $wpdb->prepare(
+			"INSERT INTO {$table_webhooks} (file_code, event, post_id, ip, received_at, status)
+			 VALUES (%s, %s, %d, %s, %s, %s)
+			 ON DUPLICATE KEY UPDATE post_id = VALUES(post_id), ip = VALUES(ip), received_at = VALUES(received_at), status = VALUES(status)",
+			$file_code,
+			$event,
+			0,
+			$client_ip,
+			$now_date,
+			'unmatched'
 		) );
 
 		return new WP_REST_Response( array(
@@ -338,38 +369,53 @@ class PeeStream_Webhook {
 		$now_date = current_time( 'mysql' );
 
 		$matched_post_id = 0;
+		$matching_movies = array();
 
 		// 1. Strict IMDb Match
 		if ( ! empty( $imdb_id ) ) {
-			$matched_post_id = (int) $wpdb->get_var( $wpdb->prepare(
+			$matching_movies = $wpdb->get_col( $wpdb->prepare(
 				"SELECT p.ID FROM {$wpdb->posts} p
 				 INNER JOIN {$wpdb->postmeta} pm ON (p.ID = pm.post_id AND (pm.meta_key = 'ids' OR pm.meta_key = 'imdb_id'))
-				 WHERE p.post_type IN ('movies', 'post') AND pm.meta_value = %s LIMIT 1",
+				 WHERE p.post_type IN ('movies', 'post') AND pm.meta_value = %s",
 				$imdb_id
 			) );
 		}
 
 		// 2. Strict TMDb Match
-		if ( ! $matched_post_id && $tmdb_id > 0 ) {
-			$matched_post_id = (int) $wpdb->get_var( $wpdb->prepare(
+		if ( empty( $matching_movies ) && $tmdb_id > 0 ) {
+			$matching_movies = $wpdb->get_col( $wpdb->prepare(
 				"SELECT p.ID FROM {$wpdb->posts} p
 				 INNER JOIN {$wpdb->postmeta} pm ON (p.ID = pm.post_id AND (pm.meta_key = 'id' OR pm.meta_key = 'tmdb_id'))
-				 WHERE p.post_type IN ('movies', 'post') AND pm.meta_value = %d LIMIT 1",
+				 WHERE p.post_type IN ('movies', 'post') AND pm.meta_value = %d",
 				$tmdb_id
 			) );
 		}
+
+		// Ambiguity check: if multiple movies share the same IMDb or TMDb identifier, reject with 409
+		if ( count( $matching_movies ) > 1 ) {
+			return new WP_REST_Response( array(
+				'success' => false,
+				'action'  => 'ambiguous_match',
+				'error'   => sprintf( 'Ambiguous match: %d movies share identifier (%s). Manual review required.', count( $matching_movies ), esc_html( $imdb_id ?: (string) $tmdb_id ) ),
+			), 409 );
+		}
+
+		$matched_post_id = ! empty( $matching_movies ) ? (int) $matching_movies[0] : 0;
 
 		// A. Update Existing Movie
 		if ( $matched_post_id > 0 ) {
 			$this->attach_server_to_post( $matched_post_id, $server_entry, $file_code, $embed_url );
 
-			$wpdb->insert( $table_webhooks, array(
-				'file_code'   => $file_code,
-				'event'       => $event,
-				'post_id'     => $matched_post_id,
-				'ip'          => $client_ip,
-				'received_at' => $now_date,
-				'status'      => 'processed',
+			$wpdb->query( $wpdb->prepare(
+				"INSERT INTO {$table_webhooks} (file_code, event, post_id, ip, received_at, status)
+				 VALUES (%s, %s, %d, %s, %s, %s)
+				 ON DUPLICATE KEY UPDATE post_id = VALUES(post_id), ip = VALUES(ip), received_at = VALUES(received_at), status = VALUES(status)",
+				$file_code,
+				$event,
+				$matched_post_id,
+				$client_ip,
+				$now_date,
+				'processed'
 			) );
 
 			return new WP_REST_Response( array(
@@ -407,13 +453,16 @@ class PeeStream_Webhook {
 
 			$this->attach_server_to_post( $new_post_id, $server_entry, $file_code, $embed_url );
 
-			$wpdb->insert( $table_webhooks, array(
-				'file_code'   => $file_code,
-				'event'       => $event,
-				'post_id'     => $new_post_id,
-				'ip'          => $client_ip,
-				'received_at' => $now_date,
-				'status'      => 'processed',
+			$wpdb->query( $wpdb->prepare(
+				"INSERT INTO {$table_webhooks} (file_code, event, post_id, ip, received_at, status)
+				 VALUES (%s, %s, %d, %s, %s, %s)
+				 ON DUPLICATE KEY UPDATE post_id = VALUES(post_id), ip = VALUES(ip), received_at = VALUES(received_at), status = VALUES(status)",
+				$file_code,
+				$event,
+				$new_post_id,
+				$client_ip,
+				$now_date,
+				'processed'
 			) );
 
 			return new WP_REST_Response( array(
@@ -425,21 +474,24 @@ class PeeStream_Webhook {
 			), 201 );
 		}
 
-		// C. Unmatched Movie
-		$wpdb->insert( $table_webhooks, array(
-			'file_code'   => $file_code,
-			'event'       => $event,
-			'post_id'     => 0,
-			'ip'          => $client_ip,
-			'received_at' => $now_date,
-			'status'      => 'unmatched',
+		// C. Unmatched Movie: Audit and leave untouched
+		$wpdb->query( $wpdb->prepare(
+			"INSERT INTO {$table_webhooks} (file_code, event, post_id, ip, received_at, status)
+			 VALUES (%s, %s, %d, %s, %s, %s)
+			 ON DUPLICATE KEY UPDATE post_id = VALUES(post_id), ip = VALUES(ip), received_at = VALUES(received_at), status = VALUES(status)",
+			$file_code,
+			$event,
+			0,
+			$client_ip,
+			$now_date,
+			'unmatched'
 		) );
 
 		return new WP_REST_Response( array(
 			'success'   => true,
 			'action'    => 'unmatched',
 			'file_code' => $file_code,
-			'message'   => 'Movie not matched by verified IMDb/TMDb ID and auto-create is disabled.',
+			'message'   => 'Ambiguous or unverified movie. No matching post found by IMDb or TMDb ID. Original articles untouched.',
 		), 200 );
 	}
 

@@ -429,7 +429,9 @@ class PeeStream_Migrator {
 		}
 
 		$fld_id        = isset( $this->options['default_folder_id'] ) ? absint( $this->options['default_folder_id'] ) : 0;
-		$server_name   = ! empty( $this->options['default_server_name'] ) ? sanitize_text_field( $this->options['default_server_name'] ) : 'PeeStream HD';
+		$server_name   = ! empty( $_POST['server_name'] ) ? sanitize_text_field( $_POST['server_name'] ) : ( ! empty( $this->options['default_server_name'] ) ? sanitize_text_field( $this->options['default_server_name'] ) : 'PeeStream HD' );
+		$language      = ! empty( $_POST['language'] ) ? sanitize_text_field( $_POST['language'] ) : ( ! empty( $this->options['default_language'] ) ? sanitize_text_field( $this->options['default_language'] ) : 'English' );
+		$quality       = ! empty( $_POST['quality'] ) ? sanitize_text_field( $_POST['quality'] ) : ( ! empty( $this->options['default_quality'] ) ? sanitize_text_field( $this->options['default_quality'] ) : 'HD 1080p' );
 
 		global $wpdb;
 		$table_queue   = $wpdb->prefix . 'peestream_migration_queue';
@@ -550,6 +552,10 @@ class PeeStream_Migrator {
 							'post_id'             => $p_id,
 							'original_url'        => $url,
 							'filecode'            => $filecode,
+							'mode'                => $mode,
+							'server_name'         => $server_name,
+							'language'            => $language,
+							'quality'             => $quality,
 							'state'               => 'pending',
 							'original_repeatable' => maybe_serialize( $snapshot_meta ),
 							'created_at'          => current_time( 'mysql' ),
@@ -598,8 +604,14 @@ class PeeStream_Migrator {
 						);
 
 						if ( 'replace' === $mode ) {
-							$srv['url']  = $new_url;
-							$srv['name'] = $server_name;
+							$srv['url']     = $new_url;
+							$srv['name']    = $server_name;
+							if ( ! empty( $language ) ) {
+								$srv['idioma'] = $language;
+							}
+							if ( ! empty( $quality ) ) {
+								$srv['quality'] = $quality;
+							}
 							$post_modified = true;
 							$logs[] = sprintf( '[READY - REPLACED] Post #%d: Replaced %s with PeeStream %s (canplay=1).', $p_id, $detected['name'], $filecode );
 						} else {
@@ -607,8 +619,8 @@ class PeeStream_Migrator {
 							$new_entry = array(
 								'name'    => $server_name,
 								'select'  => 'iframe',
-								'idioma'  => isset( $srv['idioma'] ) ? $srv['idioma'] : 'English',
-								'quality' => isset( $srv['quality'] ) ? $srv['quality'] : '1080p',
+								'idioma'  => ! empty( $language ) ? $language : ( isset( $srv['idioma'] ) ? $srv['idioma'] : 'English' ),
+								'quality' => ! empty( $quality ) ? $quality : ( isset( $srv['quality'] ) ? $srv['quality'] : '1080p' ),
 								'url'     => $new_url,
 							);
 							array_unshift( $meta, $new_entry );
@@ -646,6 +658,7 @@ class PeeStream_Migrator {
 
 	/**
 	 * Poll PeeStream API for single file status (/api/file/info)
+	 * Handles PeeStream array result format [ { "filecode": "...", "canplay": 1, ... } ]
 	 */
 	private function query_file_info( $api_domain, $api_key, $filecode ) {
 		if ( empty( $filecode ) || empty( $api_key ) ) {
@@ -672,34 +685,58 @@ class PeeStream_Migrator {
 			return false;
 		}
 
-		return isset( $body['result'] ) ? $body['result'] : false;
+		if ( empty( $body['result'] ) ) {
+			return false;
+		}
+
+		$result = $body['result'];
+
+		// PeeStream API returns result as an array of objects: [ { "filecode": "...", "canplay": 1, ... } ]
+		if ( is_array( $result ) ) {
+			if ( isset( $result[0] ) && is_array( $result[0] ) ) {
+				foreach ( $result as $item ) {
+					if ( is_array( $item ) ) {
+						$fc = isset( $item['filecode'] ) ? $item['filecode'] : ( isset( $item['file_code'] ) ? $item['file_code'] : '' );
+						if ( $fc === $filecode || empty( $fc ) ) {
+							return $item;
+						}
+					}
+				}
+				return $result[0];
+			}
+			return $result;
+		}
+
+		return false;
 	}
 
 	/**
-	 * Poll pending queue items and update DooPlay repeatable_fields if ready
+	 * Core batch processor for pending migration queue items
+	 * Shared between manual AJAX checks and automated WP-Cron runs
 	 */
-	public function ajax_check_queue() {
-		check_ajax_referer( 'peestream_migrator_nonce', 'nonce' );
-
-		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_send_json_error( array( 'message' => __( 'Permission denied.', 'peestream-wp-dooplay' ) ) );
-		}
-
+	public function process_queue_batch( $limit = 20 ) {
 		$api_key = ! empty( $this->options['api_key'] ) ? $this->options['api_key'] : '';
 		if ( empty( $api_key ) ) {
-			wp_send_json_error( array( 'message' => __( 'API key not configured.', 'peestream-wp-dooplay' ) ) );
+			return array(
+				'checked_count' => 0,
+				'ready_count'   => 0,
+				'logs'          => array( 'PeeStream API key not configured.' ),
+			);
 		}
 
 		$api_domain    = ! empty( $this->options['api_domain'] ) ? rtrim( $this->options['api_domain'], '/' ) : 'https://peestream.com';
 		$player_domain = ! empty( $this->options['player_domain'] ) ? rtrim( $this->options['player_domain'], '/' ) : 'https://peeplayer.com';
-		$server_name   = ! empty( $this->options['default_server_name'] ) ? sanitize_text_field( $this->options['default_server_name'] ) : 'PeeStream HD';
+		$default_server_name = ! empty( $this->options['default_server_name'] ) ? sanitize_text_field( $this->options['default_server_name'] ) : 'PeeStream HD';
 
 		global $wpdb;
 		$table_queue   = $wpdb->prefix . 'peestream_migration_queue';
 		$table_backups = $wpdb->prefix . 'peestream_migration_backups';
 
 		$pending_items = $wpdb->get_results(
-			"SELECT * FROM {$table_queue} WHERE status IN ('pending', 'queued', 'checking') LIMIT 25",
+			$wpdb->prepare(
+				"SELECT * FROM {$table_queue} WHERE status IN ('pending', 'queued', 'checking') ORDER BY id ASC LIMIT %d",
+				max( 1, intval( $limit ) )
+			),
 			ARRAY_A
 		);
 
@@ -707,17 +744,47 @@ class PeeStream_Migrator {
 		$logs = array();
 
 		foreach ( $pending_items as $item ) {
-			$p_id     = (int) $item['post_id'];
-			$filecode = $item['filecode'];
-			$orig_url = $item['original_url'];
+			$p_id        = (int) $item['post_id'];
+			$filecode    = $item['filecode'];
+			$orig_url    = $item['original_url'];
+			$mode        = ! empty( $item['mode'] ) ? $item['mode'] : 'replace';
+			$srv_name    = ! empty( $item['server_name'] ) ? $item['server_name'] : $default_server_name;
+			$language    = ! empty( $item['language'] ) ? $item['language'] : 'English';
+			$quality     = ! empty( $item['quality'] ) ? $item['quality'] : '1080p';
+			$retry_count = isset( $item['retry_count'] ) ? (int) $item['retry_count'] : 0;
+
+			// Bounded retry & timeout safeguard (max 20 retries or older than 24 hours)
+			$created_time = ! empty( $item['created_at'] ) ? strtotime( $item['created_at'] ) : 0;
+			if ( $retry_count >= 20 || ( $created_time > 0 && ( time() - $created_time ) > 86400 ) ) {
+				$wpdb->update(
+					$table_queue,
+					array(
+						'state'      => 'failed',
+						'status'     => 'failed',
+						'error_msg'  => 'Max retry timeout exceeded (24h / 20 attempts).',
+						'updated_at' => current_time( 'mysql' ),
+					),
+					array( 'id' => (int) $item['id'] )
+				);
+				$logs[] = sprintf( '[TIMEOUT] Post #%d: Encoding wait timeout exceeded for %s. Original link untouched.', $p_id, $filecode );
+				continue;
+			}
 
 			$info = $this->query_file_info( $api_domain, $api_key, $filecode );
 			if ( ! $info ) {
+				$wpdb->update(
+					$table_queue,
+					array(
+						'retry_count' => $retry_count + 1,
+						'updated_at'  => current_time( 'mysql' ),
+					),
+					array( 'id' => (int) $item['id'] )
+				);
 				continue;
 			}
 
 			if ( isset( $info['canplay'] ) && 1 === (int) $info['canplay'] ) {
-				// Video is ready!
+				// Video is verified READY!
 				$meta = get_post_meta( $p_id, 'repeatable_fields', true );
 				if ( is_string( $meta ) ) {
 					$meta = maybe_unserialize( $meta );
@@ -728,7 +795,7 @@ class PeeStream_Migrator {
 
 				$new_url = $player_domain . '/e/' . $filecode;
 
-				// Check duplicate
+				// Check duplicate: prevent duplicate player entries
 				$already_present = false;
 				foreach ( $meta as $check_s ) {
 					if ( isset( $check_s['url'] ) && ( $check_s['url'] === $new_url || strpos( $check_s['url'], '/e/' . $filecode ) !== false ) ) {
@@ -738,7 +805,7 @@ class PeeStream_Migrator {
 				}
 
 				if ( ! $already_present ) {
-					// Save backup
+					// Save pre-modification backup snapshot
 					$wpdb->insert(
 						$table_backups,
 						array(
@@ -751,14 +818,43 @@ class PeeStream_Migrator {
 						)
 					);
 
-					// Prepend as primary
-					array_unshift( $meta, array(
-						'name'    => $server_name,
-						'select'  => 'iframe',
-						'idioma'  => 'English',
-						'quality' => '1080p',
-						'url'     => $new_url,
-					) );
+					if ( 'replace' === $mode ) {
+						// Surgical in-place replacement of the matched hoster server
+						$replaced = false;
+						$orig_host = parse_url( $orig_url, PHP_URL_HOST );
+						foreach ( $meta as &$srv ) {
+							if ( isset( $srv['url'] ) && ( $srv['url'] === $orig_url || ( ! empty( $orig_host ) && strpos( $srv['url'], $orig_host ) !== false ) ) ) {
+								$srv['url']    = $new_url;
+								$srv['name']   = $srv_name;
+								$srv['select'] = 'iframe';
+								if ( ! empty( $language ) ) $srv['idioma'] = $language;
+								if ( ! empty( $quality ) ) $srv['quality'] = $quality;
+								$replaced = true;
+								break;
+							}
+						}
+						unset( $srv );
+
+						if ( ! $replaced ) {
+							// If target hoster server was deleted in the interim, append safely
+							$meta[] = array(
+								'name'    => $srv_name,
+								'select'  => 'iframe',
+								'idioma'  => $language,
+								'quality' => $quality,
+								'url'     => $new_url,
+							);
+						}
+					} else {
+						// Primary strategy: Prepend to the top of the DooPlay player list
+						array_unshift( $meta, array(
+							'name'    => $srv_name,
+							'select'  => 'iframe',
+							'idioma'  => $language,
+							'quality' => $quality,
+							'url'     => $new_url,
+						) );
+					}
 
 					update_post_meta( $p_id, 'repeatable_fields', array_values( $meta ) );
 				}
@@ -774,30 +870,73 @@ class PeeStream_Migrator {
 				);
 
 				$updated_count++;
-				$logs[] = sprintf( '[READY] Post #%d: Video %s is ready! PeeStream player attached.', $p_id, $filecode );
-			} elseif ( isset( $info['state'] ) && 'failed' === $info['state'] ) {
+				$logs[] = sprintf( '[READY] Post #%d: Video %s is ready! PeeStream player attached (Strategy: %s).', $p_id, $filecode, $mode );
+			} elseif ( ( isset( $info['state'] ) && 'failed' === $info['state'] ) || ( isset( $info['status'] ) && 404 === (int) $info['status'] ) ) {
 				$wpdb->update(
 					$table_queue,
 					array(
 						'state'      => 'failed',
 						'status'     => 'failed',
+						'error_msg'  => 'API reported failed or missing video.',
 						'updated_at' => current_time( 'mysql' ),
 					),
 					array( 'id' => (int) $item['id'] )
 				);
 				$logs[] = sprintf( '[FAILED] Post #%d: PeeStream remote download failed for %s. Original link untouched.', $p_id, $filecode );
+			} else {
+				$cur_state = ( isset( $info['state'] ) ) ? $info['state'] : 'pending';
+				$wpdb->update(
+					$table_queue,
+					array(
+						'state'       => $cur_state,
+						'retry_count' => $retry_count + 1,
+						'updated_at'  => current_time( 'mysql' ),
+					),
+					array( 'id' => (int) $item['id'] )
+				);
 			}
 		}
 
-		wp_send_json_success( array(
+		return array(
 			'checked_count' => count( $pending_items ),
 			'ready_count'   => $updated_count,
 			'logs'          => $logs,
-		) );
+		);
 	}
 
 	/**
-	 * Rollback migrated posts to their original state from backups table
+	 * AJAX endpoint to poll pending queue items
+	 */
+	public function ajax_check_queue() {
+		check_ajax_referer( 'peestream_migrator_nonce', 'nonce' );
+
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( array( 'message' => __( 'Permission denied.', 'peestream-wp-dooplay' ) ) );
+		}
+
+		$res = $this->process_queue_batch( 25 );
+		wp_send_json_success( $res );
+	}
+
+	/**
+	 * Automated WP-Cron processor with transient concurrency lock
+	 */
+	public static function cron_check_queue() {
+		if ( get_transient( 'peestream_queue_cron_lock' ) ) {
+			return;
+		}
+		set_transient( 'peestream_queue_cron_lock', 1, 120 );
+
+		$migrator = new self();
+		$migrator->process_queue_batch( 20 );
+
+		delete_transient( 'peestream_queue_cron_lock' );
+	}
+
+	/**
+	 * Surgical rollback of migrated posts
+	 * Reverts only the PeeStream server back to the original hoster link,
+	 * ensuring newer editorial modifications and server additions are preserved.
 	 */
 	public function ajax_rollback() {
 		check_ajax_referer( 'peestream_migrator_nonce', 'nonce' );
@@ -809,10 +948,19 @@ class PeeStream_Migrator {
 		global $wpdb;
 		$table_backups = $wpdb->prefix . 'peestream_migration_backups';
 
-		$backups = $wpdb->get_results(
-			"SELECT * FROM {$table_backups} WHERE status = 'completed' ORDER BY id DESC LIMIT 100",
-			ARRAY_A
-		);
+		$target_post_id = isset( $_POST['post_id'] ) ? (int) $_POST['post_id'] : 0;
+
+		if ( $target_post_id > 0 ) {
+			$backups = $wpdb->get_results(
+				$wpdb->prepare( "SELECT * FROM {$table_backups} WHERE post_id = %d AND status = 'completed' ORDER BY id DESC", $target_post_id ),
+				ARRAY_A
+			);
+		} else {
+			$backups = $wpdb->get_results(
+				"SELECT * FROM {$table_backups} WHERE status = 'completed' ORDER BY id DESC LIMIT 100",
+				ARRAY_A
+			);
+		}
 
 		if ( empty( $backups ) ) {
 			wp_send_json_error( array( 'message' => __( 'No active backups found to rollback.', 'peestream-wp-dooplay' ) ) );
@@ -823,24 +971,51 @@ class PeeStream_Migrator {
 
 		foreach ( $backups as $b ) {
 			$post_id  = (int) $b['post_id'];
-			$original = maybe_unserialize( $b['original_repeatable'] );
+			$orig_url = trim( (string) $b['migrated_url'] );
+			$new_code = trim( (string) $b['new_code'] );
 
-			if ( is_array( $original ) ) {
-				update_post_meta( $post_id, 'repeatable_fields', $original );
-				$wpdb->update(
-					$table_backups,
-					array( 'status' => 'rolled_back' ),
-					array( 'id' => (int) $b['id'] )
-				);
-				$restored_count++;
-				$logs[] = sprintf( '[ROLLBACK] Post #%d: Restored original DooPlay video servers.', $post_id );
+			$current_meta = get_post_meta( $post_id, 'repeatable_fields', true );
+			if ( is_string( $current_meta ) ) {
+				$current_meta = maybe_unserialize( $current_meta );
 			}
+			if ( ! is_array( $current_meta ) ) {
+				$current_meta = array();
+			}
+
+			// Surgical rollback: do NOT overwrite entire repeatable_fields with old snapshot!
+			// Check if current post still contains this PeeStream replacement
+			$modified = false;
+			foreach ( $current_meta as $idx => &$srv ) {
+				if ( isset( $srv['url'] ) && ( strpos( $srv['url'], '/e/' . $new_code ) !== false || $srv['url'] === $new_code ) ) {
+					if ( ! empty( $orig_url ) ) {
+						// Revert only the PeeStream URL back to the original hoster URL
+						$srv['url'] = $orig_url;
+					} else {
+						// Primary prepend mode: remove this server entry safely
+						unset( $current_meta[ $idx ] );
+					}
+					$modified = true;
+				}
+			}
+			unset( $srv );
+
+			if ( $modified ) {
+				update_post_meta( $post_id, 'repeatable_fields', array_values( $current_meta ) );
+				$restored_count++;
+				$logs[] = sprintf( '[ROLLBACK] Post #%d: Surgically restored original video server. Editorial additions preserved.', $post_id );
+			}
+
+			$wpdb->update(
+				$table_backups,
+				array( 'status' => 'rolled_back' ),
+				array( 'id' => (int) $b['id'] )
+			);
 		}
 
 		wp_send_json_success( array(
 			'restored_count' => $restored_count,
 			'logs'           => $logs,
-			'message'        => sprintf( __( 'Rollback completed: %d posts restored.', 'peestream-wp-dooplay' ), $restored_count ),
+			'message'        => sprintf( __( 'Surgical rollback completed: %d posts reverted. Newer editorial changes preserved.', 'peestream-wp-dooplay' ), $restored_count ),
 		) );
 	}
 }

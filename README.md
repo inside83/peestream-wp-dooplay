@@ -90,21 +90,25 @@ array(
 ## Changelog
 
 ### Version 1.0.1
-- **Security:** Hardened REST API webhook with POST-only restriction, fail-closed secret authentication (>= 16 chars), IP rate-limiting, and replay protection via `wp_peestream_webhooks`.
+- **Security & Webhook Disambiguation:** Hardened REST API webhook with POST-only restriction, fail-closed secret authentication (>= 16 chars), IP rate-limiting, and atomic replay protection with `UNIQUE KEY uq_fc_event (file_code, event)`.
+- **Security:** Strict ambiguity detection for duplicate IMDb/TMDb IDs and duplicate season/episode entries across different shows, rejecting with 409 Conflict for manual review to prevent wrong overwrites.
 - **Security:** Default `auto_create_posts` set to `0` (opt-in only). Unmatched incoming webhook items logged for manual review.
 - **Security:** XSS prevention across admin, metabox, and migrator scripts using safe DOM node construction and `.text()`.
-- **Reliability:** Persistent migration queue (`wp_peestream_migration_queue`) with status polling (`/api/file/info`). Competitor links are modified only when `canplay=1`.
-- **Reliability:** Automated backups (`wp_peestream_migration_backups`) and 1-click rollback support.
+- **Reliability & Async Queue:** Persistent migration queue (`wp_peestream_migration_queue`) with status polling (`/api/file/info`). Correctly handles PeeStream array result payload `[ { "filecode": "...", "canplay": 1 } ]`. Competitor links are modified only when `canplay=1`.
+- **Automated Processing:** Automated background queue processing via WP-Cron (`peestream_cron_process_queue`) with transient concurrency locking and bounded retry protection (max 20 retries / 24h timeout).
+- **Strategy Preservation:** Migration queue preserves selected mode (`replace` vs `primary`) along with user-selected server name, audio language, and quality badges.
+- **Surgical Rollback:** Selective and targeted rollback engine restores only the specific PeeStream server back to the original hoster URL, guaranteeing newer editorial modifications and additional servers are completely preserved.
 - **Reliability:** Dry-run simulation mode for migrator.
 - **Compatibility:** Strict host validation against confirmed PeeStream hosters (Streamtape, MixDrop, VOE, StreamWish, EarnVids/VidHide, PixelDrain). Non-functional hosters removed.
 - **Network:** Replaced all HTTP requests with `wp_safe_remote_get()` and enforced HTTPS API endpoints.
-- **Performance:** Paginated database scanning for large `wp_postmeta` tables.
+- **License:** Full GNU General Public License v2 (GPLv2).
 
 ### Version 1.0.0
 - Initial release with DooPlay metabox, shortcode, competitor migrator, and webhook receiver.
 
 ---
 
-## License
+## License & Support
 
-GPLv2 or later. Developed and maintained by the PeeStream Engineering Team.
+- **License:** GNU General Public License v2 (GPLv2).
+- **Official Support:** Visit `https://peestream.com` or contact our WJunction support thread.
