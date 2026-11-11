@@ -20,12 +20,16 @@
 			if (!apiKey) {
 				$feedback.removeClass('peestream-notice-success')
 					.addClass('peestream-notice peestream-notice-error')
-					.html('<strong>Error:</strong> Please enter an API key first.')
+					.empty()
+					.append($('<strong>').text('Error: '))
+					.append(document.createTextNode(' Please enter an API key first.'))
 					.slideDown();
 				return;
 			}
 
-			$btnCheck.prop('disabled', true).html('<span class="dashicons dashicons-update peestream-spin"></span> Connecting...');
+			$btnCheck.prop('disabled', true).empty()
+				.append($('<span class="dashicons dashicons-update peestream-spin"></span>'))
+				.append(document.createTextNode(' Connecting...'));
 			$feedback.slideUp();
 
 			$.ajax({
@@ -38,16 +42,26 @@
 					api_key: apiKey
 				},
 				success: function(response) {
-					$btnCheck.prop('disabled', false).html('<span class="dashicons dashicons-update"></span> Verify API Connection');
+					$btnCheck.prop('disabled', false).empty()
+						.append($('<span class="dashicons dashicons-update"></span>'))
+						.append(document.createTextNode(' Verify API Connection'));
 					
 					if (response.success && response.data) {
 						$dot.addClass('active');
 						$statusTitle.text('Connected to PeeStream Cloud');
-						$statusDesc.html('Account: <strong>' + response.data.email + '</strong> | Balance: <strong>' + response.data.balance + '</strong> | Storage: <strong>' + response.data.storage_used + '</strong>');
+						$statusDesc.empty()
+							.append(document.createTextNode('Account: '))
+							.append($('<strong>').text(response.data.email || ''))
+							.append(document.createTextNode(' | Balance: '))
+							.append($('<strong>').text(response.data.balance || ''))
+							.append(document.createTextNode(' | Storage: '))
+							.append($('<strong>').text(response.data.storage_used || ''));
 
 						$feedback.removeClass('peestream-notice-error')
 							.addClass('peestream-notice peestream-notice-success')
-							.html('<strong>Success!</strong> ' + response.data.message)
+							.empty()
+							.append($('<strong>').text('Success! '))
+							.append(document.createTextNode(response.data.message || ''))
 							.slideDown();
 					} else {
 						var err = (response.data && response.data.message) ? response.data.message : 'Unknown API error.';
@@ -57,16 +71,22 @@
 
 						$feedback.removeClass('peestream-notice-success')
 							.addClass('peestream-notice peestream-notice-error')
-							.html('<strong>Error:</strong> ' + err)
+							.empty()
+							.append($('<strong>').text('Error: '))
+							.append(document.createTextNode(err))
 							.slideDown();
 					}
 				},
 				error: function(xhr, status, error) {
-					$btnCheck.prop('disabled', false).html('<span class="dashicons dashicons-update"></span> Verify API Connection');
+					$btnCheck.prop('disabled', false).empty()
+						.append($('<span class="dashicons dashicons-update"></span>'))
+						.append(document.createTextNode(' Verify API Connection'));
 					$dot.removeClass('active');
 					$feedback.removeClass('peestream-notice-success')
 						.addClass('peestream-notice peestream-notice-error')
-						.html('<strong>AJAX Error:</strong> ' + error)
+						.empty()
+						.append($('<strong>').text('AJAX Error: '))
+						.append(document.createTextNode(error))
 						.slideDown();
 				}
 			});

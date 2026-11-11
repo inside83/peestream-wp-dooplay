@@ -16,7 +16,7 @@
 		function showAlert(msg, isSuccess) {
 			$alert.removeClass('peestream-mb-alert-success peestream-mb-alert-error')
 				.addClass(isSuccess ? 'peestream-mb-alert-success' : 'peestream-mb-alert-error')
-				.html(msg)
+				.text(msg)
 				.slideDown();
 			setTimeout(function() {
 				$alert.slideUp();
@@ -66,7 +66,9 @@
 					position: position
 				},
 				success: function(res) {
-					$btn.prop('disabled', false).html('<span class="dashicons dashicons-plus-alt2"></span> Add to DooPlay Players');
+					$btn.prop('disabled', false).empty()
+						.append($('<span class="dashicons dashicons-plus-alt2"></span>'))
+						.append(document.createTextNode(' Add to DooPlay Players'));
 					if (res.success && res.data) {
 						$('#pst_servers_table_wrapper').html(res.data.table_html);
 						$('#pst_servers_count').text(res.data.count);
@@ -77,7 +79,9 @@
 					}
 				},
 				error: function(xhr, status, err) {
-					$btn.prop('disabled', false).html('<span class="dashicons dashicons-plus-alt2"></span> Add to DooPlay Players');
+					$btn.prop('disabled', false).empty()
+						.append($('<span class="dashicons dashicons-plus-alt2"></span>'))
+						.append(document.createTextNode(' Add to DooPlay Players'));
 					showAlert('AJAX Error: ' + err, false);
 				}
 			});
@@ -109,7 +113,9 @@
 					title: title
 				},
 				success: function(res) {
-					$btn.prop('disabled', false).html('<span class="dashicons dashicons-cloud-upload"></span> Upload & Attach Server');
+					$btn.prop('disabled', false).empty()
+						.append($('<span class="dashicons dashicons-cloud-upload"></span>'))
+						.append(document.createTextNode(' Upload & Attach Server'));
 					if (res.success && res.data && res.data.filecode) {
 						// Auto-populate quick code tab and trigger insertion
 						$('#pst_quick_code').val(res.data.filecode);
@@ -120,7 +126,9 @@
 					}
 				},
 				error: function(xhr, status, err) {
-					$btn.prop('disabled', false).html('<span class="dashicons dashicons-cloud-upload"></span> Upload & Attach Server');
+					$btn.prop('disabled', false).empty()
+						.append($('<span class="dashicons dashicons-cloud-upload"></span>'))
+						.append(document.createTextNode(' Upload & Attach Server'));
 					showAlert('AJAX Error: ' + err, false);
 				}
 			});
@@ -154,7 +162,9 @@
 					episode: ep
 				},
 				success: function(res) {
-					$btn.prop('disabled', false).html('<span class="dashicons dashicons-tickets-alt"></span> Queue IMDb Video & Attach');
+					$btn.prop('disabled', false).empty()
+						.append($('<span class="dashicons dashicons-tickets-alt"></span>'))
+						.append(document.createTextNode(' Queue IMDb Video & Attach'));
 					if (res.success && res.data && res.data.filecode) {
 						$('#pst_quick_code').val(res.data.filecode);
 						$('#pst_btn_add_quick').trigger('click');
@@ -163,7 +173,9 @@
 					}
 				},
 				error: function(xhr, status, err) {
-					$btn.prop('disabled', false).html('<span class="dashicons dashicons-tickets-alt"></span> Queue IMDb Video & Attach');
+					$btn.prop('disabled', false).empty()
+						.append($('<span class="dashicons dashicons-tickets-alt"></span>'))
+						.append(document.createTextNode(' Queue IMDb Video & Attach'));
 					showAlert('AJAX Error: ' + err, false);
 				}
 			});

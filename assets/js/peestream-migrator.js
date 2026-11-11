@@ -13,6 +13,8 @@
 
 		var $btnScan = $('#pst_btn_scan');
 		var $btnStart = $('#pst_btn_start_migration');
+		var $btnCheckQueue = $('#pst_btn_check_queue');
+		var $btnRollback = $('#pst_btn_rollback');
 		var $scanLoading = $('#pst_scan_loading');
 		var $scanResults = $('#pst_scan_results');
 		var $scanTableBody = $('#pst_scan_table_body');
@@ -22,10 +24,12 @@
 		var $progressPercent = $('#pst_progress_percent');
 		var $progressStatus = $('#pst_progress_status');
 		var $progressContainer = $('#pst_progress_container');
+		var $dryRun = $('#pst_dry_run');
 
 		function log(msg) {
 			var time = new Date().toLocaleTimeString();
-			$console.append('<div>[' + time + '] ' + msg + '</div>');
+			var $line = $('<div/>').text('[' + time + '] ' + msg);
+			$console.append($line);
 			$console.scrollTop($console[0].scrollHeight);
 		}
 
@@ -36,47 +40,73 @@
 			$scanLoading.slideDown();
 			$scanResults.slideUp();
 			$btnStart.prop('disabled', true);
-			log('Initiating database scan for competitor video hosters...');
+			log('Initiating database scan for confirmed competitor video hosters...');
 
+			candidatePostIds = [];
+			scanChunk(0);
+		});
+
+		function scanChunk(offset) {
 			$.ajax({
 				url: peestreamMigratorData.ajax_url,
 				type: 'POST',
 				dataType: 'json',
 				data: {
 					action: 'peestream_migrator_scan',
-					nonce: peestreamMigratorData.nonce
+					nonce: peestreamMigratorData.nonce,
+					offset: offset,
+					limit: 250
 				},
 				success: function(res) {
-					$btnScan.prop('disabled', false);
-					$scanLoading.slideUp();
-
 					if (res.success && res.data) {
-						candidatePostIds = res.data.post_ids || [];
-						$totalCount.text(res.data.total_posts || 0);
-
-						var counts = res.data.hoster_counts || {};
-						var html = '';
-						var foundAny = false;
-
-						$.each(counts, function(hoster, count) {
-							if (count > 0) foundAny = true;
-							html += '<tr>';
-							html += '<td style="font-weight:600;text-transform:capitalize;">' + hoster + '</td>';
-							html += '<td><span class="peestream-badge-count">' + count + '</span></td>';
-							html += '<td>' + (count > 0 ? '<span style="color:#ef4444;font-weight:600;">Candidate</span>' : '<span style="color:#94a3b8;">None</span>') + '</td>';
-							html += '</tr>';
+						var chunkIds = res.data.post_ids || [];
+						candidatePostIds = candidatePostIds.concat(chunkIds);
+						// Deduplicate
+						candidatePostIds = candidatePostIds.filter(function(item, pos) {
+							return candidatePostIds.indexOf(item) === pos;
 						});
 
-						$scanTableBody.html(html);
-						$scanResults.slideDown();
+						$totalCount.text(candidatePostIds.length);
 
-						log('Scan finished: Found ' + candidatePostIds.length + ' posts containing competitor links.');
+						if (res.data.has_more && res.data.next_offset) {
+							log('Scanned ' + res.data.next_offset + ' of ' + res.data.total_records + ' records...');
+							scanChunk(res.data.next_offset);
+							return;
+						}
+
+						// Finished scanning all chunks
+						$btnScan.prop('disabled', false);
+						$scanLoading.slideUp();
+
+						var counts = res.data.hoster_counts || {};
+						$scanTableBody.empty();
+
+						$.each(counts, function(hoster, count) {
+							var $tr = $('<tr>');
+							var $tdName = $('<td style="font-weight:600;text-transform:capitalize;">').text(hoster);
+							var $tdCount = $('<td>').append($('<span class="peestream-badge-count">').text(count));
+							var $tdStatus = $('<td>');
+
+							if (count > 0) {
+								$tdStatus.append($('<span style="color:#ef4444;font-weight:600;">').text('Candidate'));
+							} else {
+								$tdStatus.append($('<span style="color:#94a3b8;">').text('None'));
+							}
+
+							$tr.append($tdName).append($tdCount).append($tdStatus);
+							$scanTableBody.append($tr);
+						});
+
+						$scanResults.slideDown();
+						log('Scan completed: Found ' + candidatePostIds.length + ' posts containing confirmed competitor links.');
 
 						if (candidatePostIds.length > 0) {
 							$btnStart.prop('disabled', false);
 						}
 					} else {
-						log('Scan error: ' + ((res.data && res.data.message) ? res.data.message : 'Unknown'));
+						$btnScan.prop('disabled', false);
+						$scanLoading.slideUp();
+						log('Scan error: ' + ((res.data && res.data.message) ? res.data.message : 'Unknown error'));
 					}
 				},
 				error: function(xhr, status, err) {
@@ -85,14 +115,15 @@
 					log('Scan AJAX Error: ' + err);
 				}
 			});
-		});
+		}
 
 		// 2. Start Migration Loop
 		$btnStart.on('click', function(e) {
 			e.preventDefault();
 			if (!candidatePostIds.length) return;
 
-			if (!confirm(peestreamMigratorData.i18n.confirm_start)) {
+			var isDryRun = $dryRun.is(':checked');
+			if (!isDryRun && !confirm(peestreamMigratorData.i18n.confirm_start)) {
 				return;
 			}
 
@@ -106,13 +137,13 @@
 			var mode = $('#pst_migration_mode').val();
 			var targetHoster = $('#pst_filter_hoster').val();
 
-			log('Starting batch migration... Strategy: ' + mode + ', Target: ' + targetHoster);
-			runNextBatch(batchSize, mode, targetHoster);
+			log('Starting batch migration... Strategy: ' + mode + ', Target: ' + targetHoster + (isDryRun ? ' [DRY-RUN]' : ''));
+			runNextBatch(batchSize, mode, targetHoster, isDryRun);
 		});
 
-		function runNextBatch(batchSize, mode, targetHoster) {
+		function runNextBatch(batchSize, mode, targetHoster, isDryRun) {
 			if (!isMigrating || currentIndex >= candidatePostIds.length) {
-				finishMigration();
+				finishMigration(isDryRun);
 				return;
 			}
 
@@ -131,7 +162,8 @@
 					nonce: peestreamMigratorData.nonce,
 					post_ids: chunk,
 					mode: mode,
-					target_hoster: targetHoster
+					target_hoster: targetHoster,
+					dry_run: isDryRun ? 1 : 0
 				},
 				success: function(res) {
 					if (res.success && res.data) {
@@ -145,29 +177,100 @@
 					}
 
 					currentIndex += batchSize;
-					// Yield slightly before next cycle
 					setTimeout(function() {
-						runNextBatch(batchSize, mode, targetHoster);
-					}, 300);
+						runNextBatch(batchSize, mode, targetHoster, isDryRun);
+					}, 250);
 				},
 				error: function(xhr, status, err) {
 					log('[ERROR] AJAX network error in batch: ' + err);
 					currentIndex += batchSize;
 					setTimeout(function() {
-						runNextBatch(batchSize, mode, targetHoster);
+						runNextBatch(batchSize, mode, targetHoster, isDryRun);
 					}, 1000);
 				}
 			});
 		}
 
-		function finishMigration() {
+		function finishMigration(isDryRun) {
 			isMigrating = false;
 			$progressBar.css('width', '100%');
 			$progressPercent.text('100%');
-			$progressStatus.text('Migration complete!');
+			$progressStatus.text(isDryRun ? 'Dry run finished!' : 'Batch migration complete!');
 			$btnScan.prop('disabled', false);
 			$btnStart.prop('disabled', false);
-			log('=== [SUCCESS] Migration finished! All target posts have been processed. ===');
+			log('=== [FINISHED] ' + (isDryRun ? 'Dry run preview completed.' : 'All candidate posts processed successfully.') + ' ===');
 		}
+
+		// 3. Check Pending Encodings
+		$btnCheckQueue.on('click', function(e) {
+			e.preventDefault();
+			$btnCheckQueue.prop('disabled', true);
+			log('Checking status of pending PeeStream transcodings in queue...');
+
+			$.ajax({
+				url: peestreamMigratorData.ajax_url,
+				type: 'POST',
+				dataType: 'json',
+				data: {
+					action: 'peestream_migrator_check_queue',
+					nonce: peestreamMigratorData.nonce
+				},
+				success: function(res) {
+					$btnCheckQueue.prop('disabled', false);
+					if (res.success && res.data) {
+						if (res.data.logs && res.data.logs.length) {
+							$.each(res.data.logs, function(i, l) {
+								log(l);
+							});
+						}
+						log('Queue check complete: ' + res.data.ready_count + ' new videos are ready and attached.');
+					} else {
+						log('Queue check error: ' + ((res.data && res.data.message) ? res.data.message : 'Unknown'));
+					}
+				},
+				error: function(xhr, status, err) {
+					$btnCheckQueue.prop('disabled', false);
+					log('Queue check AJAX error: ' + err);
+				}
+			});
+		});
+
+		// 4. Rollback Migrated Posts
+		$btnRollback.on('click', function(e) {
+			e.preventDefault();
+			if (!confirm(peestreamMigratorData.i18n.confirm_rollback)) {
+				return;
+			}
+
+			$btnRollback.prop('disabled', true);
+			log('Initiating rollback from backup storage...');
+
+			$.ajax({
+				url: peestreamMigratorData.ajax_url,
+				type: 'POST',
+				dataType: 'json',
+				data: {
+					action: 'peestream_migrator_rollback',
+					nonce: peestreamMigratorData.nonce
+				},
+				success: function(res) {
+					$btnRollback.prop('disabled', false);
+					if (res.success && res.data) {
+						if (res.data.logs && res.data.logs.length) {
+							$.each(res.data.logs, function(i, l) {
+								log(l);
+							});
+						}
+						log('=== ' + res.data.message + ' ===');
+					} else {
+						log('Rollback error: ' + ((res.data && res.data.message) ? res.data.message : 'Unknown'));
+					}
+				},
+				error: function(xhr, status, err) {
+					$btnRollback.prop('disabled', false);
+					log('Rollback AJAX error: ' + err);
+				}
+			});
+		});
 	});
 })(jQuery);

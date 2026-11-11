@@ -45,13 +45,29 @@ class PeeStream_Admin {
 	public function sanitize_settings( $input ) {
 		$output = array();
 		$output['api_key'] = isset( $input['api_key'] ) ? sanitize_text_field( trim( $input['api_key'] ) ) : '';
-		$output['player_domain'] = isset( $input['player_domain'] ) ? esc_url_raw( trim( $input['player_domain'] ) ) : 'https://peeplayer.com';
-		$output['api_domain'] = isset( $input['api_domain'] ) ? esc_url_raw( trim( $input['api_domain'] ) ) : 'https://peestream.com';
+		
+		$player_domain = isset( $input['player_domain'] ) ? esc_url_raw( trim( $input['player_domain'] ) ) : 'https://peeplayer.com';
+		if ( 0 !== strpos( $player_domain, 'https://' ) ) {
+			$player_domain = 'https://' . ltrim( preg_replace( '#^https?://#i', '', $player_domain ), '/' );
+		}
+		$output['player_domain'] = rtrim( $player_domain, '/' );
+
+		$api_domain = isset( $input['api_domain'] ) ? esc_url_raw( trim( $input['api_domain'] ) ) : 'https://peestream.com';
+		if ( 0 !== strpos( $api_domain, 'https://' ) ) {
+			$api_domain = 'https://' . ltrim( preg_replace( '#^https?://#i', '', $api_domain ), '/' );
+		}
+		$output['api_domain'] = rtrim( $api_domain, '/' );
+
 		$output['default_folder_id'] = isset( $input['default_folder_id'] ) ? absint( $input['default_folder_id'] ) : 0;
 		$output['default_server_name'] = isset( $input['default_server_name'] ) ? sanitize_text_field( trim( $input['default_server_name'] ) ) : 'PeeStream HD';
 		$output['default_language'] = isset( $input['default_language'] ) ? sanitize_text_field( trim( $input['default_language'] ) ) : 'English';
 		$output['default_quality'] = isset( $input['default_quality'] ) ? sanitize_text_field( trim( $input['default_quality'] ) ) : '1080p';
-		$output['webhook_secret'] = isset( $input['webhook_secret'] ) ? sanitize_text_field( trim( $input['webhook_secret'] ) ) : wp_generate_password( 24, false );
+		
+		$secret = isset( $input['webhook_secret'] ) ? sanitize_text_field( trim( $input['webhook_secret'] ) ) : '';
+		if ( strlen( $secret ) < 16 ) {
+			$secret = wp_generate_password( 24, false );
+		}
+		$output['webhook_secret'] = $secret;
 		$output['auto_create_posts'] = ! empty( $input['auto_create_posts'] ) ? '1' : '0';
 		$output['default_post_type'] = isset( $input['default_post_type'] ) ? sanitize_key( $input['default_post_type'] ) : 'movies';
 
@@ -101,11 +117,15 @@ class PeeStream_Admin {
 		}
 
 		$api_domain = ! empty( $this->options['api_domain'] ) ? rtrim( $this->options['api_domain'], '/' ) : 'https://peestream.com';
+		if ( 0 !== strpos( $api_domain, 'https://' ) ) {
+			$api_domain = 'https://peestream.com';
+		}
+
 		$url = $api_domain . '/api/account/info?key=' . rawurlencode( $api_key );
 
-		$response = wp_remote_get( $url, array(
-			'timeout' => 15,
-			'sslverify' => true,
+		$response = wp_safe_remote_get( $url, array(
+			'timeout'    => 15,
+			'sslverify'  => true,
 			'user-agent' => 'PeeStream-WP-DooPlay/' . PEESTREAM_VERSION,
 		) );
 
@@ -117,21 +137,21 @@ class PeeStream_Admin {
 		$body = wp_remote_retrieve_body( $response );
 		$data = json_decode( $body, true );
 
-		if ( 200 !== $code || empty( $data ) ) {
+		if ( 200 !== (int) $code || empty( $data ) ) {
 			wp_send_json_error( array( 'message' => __( 'Invalid response from PeeStream API server.', 'peestream-wp-dooplay' ) ) );
 		}
 
 		if ( isset( $data['status'] ) && 200 !== (int) $data['status'] ) {
-			wp_send_json_error( array( 'message' => isset( $data['msg'] ) ? $data['msg'] : __( 'API authentication error.', 'peestream-wp-dooplay' ) ) );
+			wp_send_json_error( array( 'message' => isset( $data['msg'] ) ? sanitize_text_field( $data['msg'] ) : __( 'API authentication error.', 'peestream-wp-dooplay' ) ) );
 		}
 
 		$res = isset( $data['result'] ) ? $data['result'] : $data;
 
 		wp_send_json_success( array(
-			'email'   => isset( $res['email'] ) ? $res['email'] : 'Active Webmaster',
-			'balance' => isset( $res['balance'] ) ? number_format( (float) $res['balance'], 2 ) . ' USD' : '0.00 USD',
-			'storage_used' => isset( $res['storage_used'] ) ? $res['storage_used'] : 'N/A',
-			'message' => __( 'API connection successful! Account active.', 'peestream-wp-dooplay' ),
+			'email'        => isset( $res['email'] ) ? sanitize_email( $res['email'] ) : 'Active Webmaster',
+			'balance'      => isset( $res['balance'] ) ? number_format( (float) $res['balance'], 2 ) . ' USD' : '0.00 USD',
+			'storage_used' => isset( $res['storage_used'] ) ? sanitize_text_field( $res['storage_used'] ) : 'N/A',
+			'message'      => __( 'API connection successful! Account active.', 'peestream-wp-dooplay' ),
 		) );
 	}
 
@@ -145,7 +165,7 @@ class PeeStream_Admin {
 			'default_language'    => 'English',
 			'default_quality'     => '1080p',
 			'webhook_secret'      => wp_generate_password( 24, false ),
-			'auto_create_posts'   => '1',
+			'auto_create_posts'   => '0', // Default OFF per P0 requirement
 			'default_post_type'   => 'movies',
 		) );
 

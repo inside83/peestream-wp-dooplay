@@ -317,6 +317,15 @@ class PeeStream_Metabox {
 			$repeatable = array();
 		}
 
+		// Prevent duplicate server entries
+		foreach ( $repeatable as $existing_srv ) {
+			$ex_url = isset( $existing_srv['url'] ) ? $existing_srv['url'] : '';
+			if ( $ex_url === $embed_url || $this->extract_code( $ex_url ) === $code ) {
+				wp_send_json_error( array( 'message' => __( 'This PeeStream video is already attached to this post.', 'peestream-wp-dooplay' ) ) );
+				return;
+			}
+		}
+
 		$new_entry = array(
 			'name'    => $server_name,
 			'select'  => 'iframe',
@@ -406,6 +415,9 @@ class PeeStream_Metabox {
 		}
 
 		$api_domain = ! empty( $this->options['api_domain'] ) ? rtrim( $this->options['api_domain'], '/' ) : 'https://peestream.com';
+		if ( 0 !== strpos( $api_domain, 'https://' ) ) {
+			$api_domain = 'https://peestream.com';
+		}
 		$fld_id     = isset( $this->options['default_folder_id'] ) ? absint( $this->options['default_folder_id'] ) : 0;
 
 		$endpoint = $api_domain . '/api/upload/url?' . http_build_query( array(
@@ -415,18 +427,22 @@ class PeeStream_Metabox {
 			'fld_id'    => $fld_id,
 		) );
 
-		$response = wp_remote_get( $endpoint, array( 'timeout' => 25, 'sslverify' => true ) );
+		$response = wp_safe_remote_get( $endpoint, array(
+			'timeout'    => 25,
+			'sslverify'  => true,
+			'user-agent' => 'PeeStream-WP-DooPlay/' . PEESTREAM_VERSION,
+		) );
 		if ( is_wp_error( $response ) ) {
 			wp_send_json_error( array( 'message' => $response->get_error_message() ) );
 		}
 
 		$data = json_decode( wp_remote_retrieve_body( $response ), true );
 		if ( ! $data || ( isset( $data['status'] ) && 200 !== (int) $data['status'] ) ) {
-			$err = isset( $data['msg'] ) ? $data['msg'] : __( 'Failed to queue video on PeeStream.', 'peestream-wp-dooplay' );
+			$err = isset( $data['msg'] ) ? sanitize_text_field( $data['msg'] ) : __( 'Failed to queue video on PeeStream.', 'peestream-wp-dooplay' );
 			wp_send_json_error( array( 'message' => $err ) );
 		}
 
-		$filecode = isset( $data['result']['filecode'] ) ? $data['result']['filecode'] : '';
+		$filecode = isset( $data['result']['filecode'] ) ? sanitize_text_field( $data['result']['filecode'] ) : '';
 		if ( empty( $filecode ) ) {
 			wp_send_json_error( array( 'message' => __( 'Missing filecode in PeeStream API response.', 'peestream-wp-dooplay' ) ) );
 		}
@@ -459,6 +475,9 @@ class PeeStream_Metabox {
 		}
 
 		$api_domain = ! empty( $this->options['api_domain'] ) ? rtrim( $this->options['api_domain'], '/' ) : 'https://peestream.com';
+		if ( 0 !== strpos( $api_domain, 'https://' ) ) {
+			$api_domain = 'https://peestream.com';
+		}
 		$fld_id     = isset( $this->options['default_folder_id'] ) ? absint( $this->options['default_folder_id'] ) : 0;
 
 		$endpoint = $api_domain . '/api/upload/imdb?' . http_build_query( array(
@@ -469,18 +488,22 @@ class PeeStream_Metabox {
 			'fld_id'  => $fld_id,
 		) );
 
-		$response = wp_remote_get( $endpoint, array( 'timeout' => 25, 'sslverify' => true ) );
+		$response = wp_safe_remote_get( $endpoint, array(
+			'timeout'    => 25,
+			'sslverify'  => true,
+			'user-agent' => 'PeeStream-WP-DooPlay/' . PEESTREAM_VERSION,
+		) );
 		if ( is_wp_error( $response ) ) {
 			wp_send_json_error( array( 'message' => $response->get_error_message() ) );
 		}
 
 		$data = json_decode( wp_remote_retrieve_body( $response ), true );
 		if ( ! $data || ( isset( $data['status'] ) && 200 !== (int) $data['status'] ) ) {
-			$err = isset( $data['msg'] ) ? $data['msg'] : __( 'Failed to import IMDb title.', 'peestream-wp-dooplay' );
+			$err = isset( $data['msg'] ) ? sanitize_text_field( $data['msg'] ) : __( 'Failed to import IMDb title.', 'peestream-wp-dooplay' );
 			wp_send_json_error( array( 'message' => $err ) );
 		}
 
-		$filecode = isset( $data['result']['filecode'] ) ? $data['result']['filecode'] : '';
+		$filecode = isset( $data['result']['filecode'] ) ? sanitize_text_field( $data['result']['filecode'] ) : '';
 		if ( empty( $filecode ) ) {
 			wp_send_json_error( array( 'message' => __( 'Missing filecode in PeeStream API response.', 'peestream-wp-dooplay' ) ) );
 		}
