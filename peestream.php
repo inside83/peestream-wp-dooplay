@@ -3,7 +3,7 @@
  * Plugin Name: PeeStream Video Player & DooPlay Integration
  * Plugin URI: https://peestream.com
  * Description: Official PeeStream WordPress plugin with native DooPlay theme player integration, remote URL importer, auto-migrator for competitor hosters, and webhook auto-publish receiver.
- * Version: 1.0.2
+ * Version: 1.0.3
  * Author: PeeStream Team
  * Author URI: https://peestream.com
  * License: GPLv2 or later
@@ -15,7 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'PEESTREAM_VERSION', '1.0.2' );
+define( 'PEESTREAM_VERSION', '1.0.3' );
 define( 'PEESTREAM_PLUGIN_FILE', __FILE__ );
 define( 'PEESTREAM_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'PEESTREAM_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -78,7 +78,7 @@ final class PeeStream_Plugin {
 		return $schedules;
 	}
 
-	const DB_SCHEMA_VERSION = 103;
+	const DB_SCHEMA_VERSION = 104;
 
 	public static function ensure_cron_scheduled() {
 		if ( ! wp_next_scheduled( 'peestream_cron_process_queue' ) ) {
@@ -142,6 +142,7 @@ final class PeeStream_Plugin {
 			updated_at datetime NOT NULL,
 			status varchar(32) NOT NULL DEFAULT 'pending',
 			PRIMARY KEY  (id),
+			UNIQUE KEY uq_post_orig (post_id, original_url(191)),
 			KEY idx_post_id (post_id),
 			KEY idx_status (status)
 		) {$charset_collate};";
@@ -172,13 +173,29 @@ final class PeeStream_Plugin {
 			return false;
 		}
 
+		// Ensure uq_post_orig unique index exists on queue table (deduplicate if needed)
+		$idx_queue = $wpdb->get_results( "SHOW INDEX FROM `{$table_queue}` WHERE Key_name = 'uq_post_orig'" );
+		if ( empty( $idx_queue ) ) {
+			$wpdb->query( "DELETE q1 FROM `{$table_queue}` q1 INNER JOIN `{$table_queue}` q2 WHERE q1.id < q2.id AND q1.post_id = q2.post_id AND q1.original_url = q2.original_url" );
+			$res_idx = $wpdb->query( "ALTER TABLE `{$table_queue}` ADD UNIQUE KEY uq_post_orig (post_id, original_url(191))" );
+			if ( false === $res_idx ) {
+				return false;
+			}
+		}
+
 		// Schema migration: ensure mode column exists in backups table and has DEFAULT 'unknown'
 		$has_mode_col = $wpdb->get_results( "SHOW COLUMNS FROM `{$table_backups}` LIKE 'mode'" );
 		if ( empty( $has_mode_col ) ) {
-			$wpdb->query( "ALTER TABLE `{$table_backups}` ADD COLUMN `mode` varchar(20) NOT NULL DEFAULT 'unknown' AFTER `new_code`" );
+			$res_alter = $wpdb->query( "ALTER TABLE `{$table_backups}` ADD COLUMN `mode` varchar(20) NOT NULL DEFAULT 'unknown' AFTER `new_code`" );
+			if ( false === $res_alter ) {
+				return false;
+			}
 		} else {
 			// Enforce default 'unknown' so MySQL doesn't assign automatic 'replace'
-			$wpdb->query( "ALTER TABLE `{$table_backups}` MODIFY COLUMN `mode` varchar(20) NOT NULL DEFAULT 'unknown'" );
+			$res_mod = $wpdb->query( "ALTER TABLE `{$table_backups}` MODIFY COLUMN `mode` varchar(20) NOT NULL DEFAULT 'unknown'" );
+			if ( false === $res_mod ) {
+				return false;
+			}
 		}
 
 		// Sanitize legacy backup records:
@@ -186,9 +203,41 @@ final class PeeStream_Plugin {
 		// or if mode is empty/null, reset to 'unknown' unless verified.
 		$wpdb->query( "UPDATE `{$table_backups}` SET `mode` = 'unknown' WHERE `mode` = '' OR `mode` IS NULL" );
 		if ( $from_schema < 103 && $from_schema > 0 ) {
-			// Older versions prior to schema 103 may have had 'replace' automatically assigned by dbDelta/ALTER.
-			// Mark historical backups as 'unknown' so surgical rollback verifies actual presence of original server.
-			$wpdb->query( "UPDATE `{$table_backups}` SET `mode` = 'unknown' WHERE `mode` = 'replace' AND `backup_time` < '" . current_time( 'mysql' ) . "'" );
+			$wpdb->query( "UPDATE `{$table_backups}` SET `mode` = 'unknown' WHERE `mode` = 'replace' AND `backup_time` < '" . current_time( 'mysql', true ) . "'" );
+		}
+
+		// Strict verification of all mandatory columns and UNIQUE indexes across all 3 tables
+		$expected_queue_cols = array( 'id', 'post_id', 'original_url', 'filecode', 'mode', 'server_name', 'language', 'quality', 'state', 'retry_count', 'error_msg', 'original_repeatable', 'created_at', 'updated_at', 'status' );
+		$actual_queue_cols = $wpdb->get_col( "SHOW COLUMNS FROM `{$table_queue}`" );
+		foreach ( $expected_queue_cols as $c ) {
+			if ( ! in_array( $c, (array) $actual_queue_cols, true ) ) {
+				return false;
+			}
+		}
+
+		$expected_webhooks_cols = array( 'id', 'file_code', 'event', 'post_id', 'ip', 'received_at', 'status' );
+		$actual_webhooks_cols = $wpdb->get_col( "SHOW COLUMNS FROM `{$table_webhooks}`" );
+		foreach ( $expected_webhooks_cols as $c ) {
+			if ( ! in_array( $c, (array) $actual_webhooks_cols, true ) ) {
+				return false;
+			}
+		}
+
+		$expected_backups_cols = array( 'id', 'post_id', 'original_repeatable', 'migrated_url', 'new_code', 'mode', 'backup_time', 'status' );
+		$actual_backups_cols = $wpdb->get_col( "SHOW COLUMNS FROM `{$table_backups}`" );
+		foreach ( $expected_backups_cols as $c ) {
+			if ( ! in_array( $c, (array) $actual_backups_cols, true ) ) {
+				return false;
+			}
+		}
+
+		$wh_idx = $wpdb->get_results( "SHOW INDEX FROM `{$table_webhooks}` WHERE Key_name = 'uq_fc_event'" );
+		if ( empty( $wh_idx ) ) {
+			return false;
+		}
+		$q_idx = $wpdb->get_results( "SHOW INDEX FROM `{$table_queue}` WHERE Key_name = 'uq_post_orig'" );
+		if ( empty( $q_idx ) ) {
+			return false;
 		}
 
 		return true;

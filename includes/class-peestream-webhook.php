@@ -140,7 +140,7 @@ class PeeStream_Webhook {
 
 		// 3. Atomic Replay Protection & Event Pre-reservation
 		// Pre-reserve event atomically on UNIQUE KEY uq_fc_event (file_code, event) with status 'processing'
-		$now_date = current_time( 'mysql' );
+		$now_date = current_time( 'mysql', true );
 		$reserved = $wpdb->query( $wpdb->prepare(
 			"INSERT IGNORE INTO {$table_webhooks} (file_code, event, post_id, ip, received_at, status)
 			 VALUES (%s, %s, 0, %s, %s, 'processing')",
@@ -278,7 +278,7 @@ class PeeStream_Webhook {
 	private function process_episode( $file_code, $embed_url, $server_entry, $imdb_id, $tmdb_id, $title, $series_title, $season, $episode, $poster_url, $auto_create, $client_ip, $event ) {
 		global $wpdb;
 		$table_webhooks = $wpdb->prefix . 'peestream_webhooks';
-		$now_date = current_time( 'mysql' );
+		$now_date = current_time( 'mysql', true );
 
 		// 1. Strict Parent TV Show Matching (Must match verified IMDb ID or TMDb ID with DISTINCT IDs)
 		$parent_show_id = 0;
@@ -355,7 +355,15 @@ class PeeStream_Webhook {
 
 		// A. Update Existing Verified Episode
 		if ( $matched_ep_id > 0 ) {
-			$this->attach_server_to_post( $matched_ep_id, $server_entry, $file_code, $embed_url );
+			$attached = $this->attach_server_to_post( $matched_ep_id, $server_entry, $file_code, $embed_url );
+			if ( ! $attached ) {
+				$wpdb->update(
+					$table_webhooks,
+					array( 'status' => 'failed', 'received_at' => $now_date ),
+					array( 'file_code' => $file_code, 'event' => $event )
+				);
+				return new WP_REST_Response( array( 'success' => false, 'error' => 'Failed to persist repeatable_fields to episode post.' ), 500 );
+			}
 
 			$wpdb->update(
 				$table_webhooks,
@@ -382,6 +390,9 @@ class PeeStream_Webhook {
 
 		// B. Auto-Create Episode Post (ONLY if parent TV show is verified AND auto-create is explicitly enabled)
 		if ( $auto_create && $parent_show_id > 0 ) {
+			$show_name = get_the_title( $parent_show_id );
+			$ep_post_title = sprintf( '%s: %dx%d', $show_name, $season, $episode );
+
 			// Idempotent recovery check: Did a previous interrupted attempt already create this draft post?
 			$existing_draft_id = (int) $wpdb->get_var( $wpdb->prepare(
 				"SELECT post_id FROM {$table_webhooks} WHERE file_code = %s AND event = %s AND post_id > 0",
@@ -398,7 +409,13 @@ class PeeStream_Webhook {
 				) );
 			}
 
-			$show_name = get_the_title( $parent_show_id );
+			if ( ! $existing_draft_id ) {
+				$existing_draft_id = (int) $wpdb->get_var( $wpdb->prepare(
+					"SELECT ID FROM {$wpdb->posts} WHERE post_type = 'episodes' AND post_title = %s AND post_status = 'draft' ORDER BY ID DESC LIMIT 1",
+					$ep_post_title
+				) );
+			}
+
 			$new_post_id = 0;
 
 			if ( $existing_draft_id > 0 && get_post( $existing_draft_id ) ) {
@@ -406,7 +423,6 @@ class PeeStream_Webhook {
 				$new_post_id = $existing_draft_id;
 			} else {
 				$author_id = $this->get_default_author_id();
-				$ep_post_title = sprintf( '%s: %dx%d', $show_name, $season, $episode );
 
 				$new_post_id = wp_insert_post( array(
 					'post_title'   => $ep_post_title,
@@ -414,6 +430,10 @@ class PeeStream_Webhook {
 					'post_status'  => 'draft', // Draft status for safe review
 					'post_type'    => 'episodes',
 					'post_author'  => $author_id,
+					'meta_input'   => array(
+						'_peestream_webhook_filecode' => $file_code,
+						'_peestream_webhook_event'    => $event,
+					),
 				) );
 
 				if ( is_wp_error( $new_post_id ) ) {
@@ -425,9 +445,7 @@ class PeeStream_Webhook {
 					return new WP_REST_Response( array( 'success' => false, 'error' => $new_post_id->get_error_message() ), 500 );
 				}
 
-				// Immediately link post ID to webhook audit record and postmeta for atomicity & crash recovery
-				update_post_meta( $new_post_id, '_peestream_webhook_filecode', $file_code );
-				update_post_meta( $new_post_id, '_peestream_webhook_event', $event );
+				// Immediately link post ID to webhook audit record
 				$wpdb->update(
 					$table_webhooks,
 					array( 'post_id' => $new_post_id ),
@@ -446,7 +464,15 @@ class PeeStream_Webhook {
 				update_post_meta( $new_post_id, 'dt_backdrop', $poster_url );
 			}
 
-			$this->attach_server_to_post( $new_post_id, $server_entry, $file_code, $embed_url );
+			$attached = $this->attach_server_to_post( $new_post_id, $server_entry, $file_code, $embed_url );
+			if ( ! $attached ) {
+				$wpdb->update(
+					$table_webhooks,
+					array( 'status' => 'failed', 'received_at' => $now_date ),
+					array( 'file_code' => $file_code, 'event' => $event )
+				);
+				return new WP_REST_Response( array( 'success' => false, 'error' => 'Failed to persist repeatable_fields to new episode draft.' ), 500 );
+			}
 
 			$wpdb->update(
 				$table_webhooks,
@@ -497,7 +523,7 @@ class PeeStream_Webhook {
 	private function process_movie( $file_code, $embed_url, $server_entry, $imdb_id, $tmdb_id, $title, $poster_url, $auto_create, $client_ip, $event ) {
 		global $wpdb;
 		$table_webhooks = $wpdb->prefix . 'peestream_webhooks';
-		$now_date = current_time( 'mysql' );
+		$now_date = current_time( 'mysql', true );
 
 		$matched_post_id = 0;
 		$matching_movies = array();
@@ -542,7 +568,15 @@ class PeeStream_Webhook {
 
 		// A. Update Existing Movie
 		if ( $matched_post_id > 0 ) {
-			$this->attach_server_to_post( $matched_post_id, $server_entry, $file_code, $embed_url );
+			$attached = $this->attach_server_to_post( $matched_post_id, $server_entry, $file_code, $embed_url );
+			if ( ! $attached ) {
+				$wpdb->update(
+					$table_webhooks,
+					array( 'status' => 'failed', 'received_at' => $now_date ),
+					array( 'file_code' => $file_code, 'event' => $event )
+				);
+				return new WP_REST_Response( array( 'success' => false, 'error' => 'Failed to persist repeatable_fields to movie post.' ), 500 );
+			}
 
 			$wpdb->update(
 				$table_webhooks,
@@ -569,6 +603,8 @@ class PeeStream_Webhook {
 
 		// B. Auto-Create Movie (Draft only, if enabled)
 		if ( $auto_create ) {
+			$target_cpt = ! empty( $this->options['default_post_type'] ) ? $this->options['default_post_type'] : 'movies';
+
 			// Idempotent recovery check: Did a previous interrupted attempt already create this draft post?
 			$existing_draft_id = (int) $wpdb->get_var( $wpdb->prepare(
 				"SELECT post_id FROM {$table_webhooks} WHERE file_code = %s AND event = %s AND post_id > 0",
@@ -585,13 +621,20 @@ class PeeStream_Webhook {
 				) );
 			}
 
+			if ( ! $existing_draft_id ) {
+				$existing_draft_id = (int) $wpdb->get_var( $wpdb->prepare(
+					"SELECT ID FROM {$wpdb->posts} WHERE post_type = %s AND post_title = %s AND post_status = 'draft' ORDER BY ID DESC LIMIT 1",
+					$target_cpt,
+					$title
+				) );
+			}
+
 			$new_post_id = 0;
 
 			if ( $existing_draft_id > 0 && get_post( $existing_draft_id ) ) {
 				// Re-use existing draft post from interrupted attempt (zero duplicate post creation!)
 				$new_post_id = $existing_draft_id;
 			} else {
-				$target_cpt = ! empty( $this->options['default_post_type'] ) ? $this->options['default_post_type'] : 'movies';
 				$author_id  = $this->get_default_author_id();
 
 				$new_post_id = wp_insert_post( array(
@@ -600,6 +643,10 @@ class PeeStream_Webhook {
 					'post_status'  => 'draft',
 					'post_type'    => $target_cpt,
 					'post_author'  => $author_id,
+					'meta_input'   => array(
+						'_peestream_webhook_filecode' => $file_code,
+						'_peestream_webhook_event'    => $event,
+					),
 				) );
 
 				if ( is_wp_error( $new_post_id ) ) {
@@ -611,9 +658,7 @@ class PeeStream_Webhook {
 					return new WP_REST_Response( array( 'success' => false, 'error' => $new_post_id->get_error_message() ), 500 );
 				}
 
-				// Immediately link post ID to webhook audit record and postmeta for atomicity & crash recovery
-				update_post_meta( $new_post_id, '_peestream_webhook_filecode', $file_code );
-				update_post_meta( $new_post_id, '_peestream_webhook_event', $event );
+				// Immediately link post ID to webhook audit record
 				$wpdb->update(
 					$table_webhooks,
 					array( 'post_id' => $new_post_id ),
@@ -628,7 +673,15 @@ class PeeStream_Webhook {
 				update_post_meta( $new_post_id, 'dt_poster', $poster_url );
 			}
 
-			$this->attach_server_to_post( $new_post_id, $server_entry, $file_code, $embed_url );
+			$attached = $this->attach_server_to_post( $new_post_id, $server_entry, $file_code, $embed_url );
+			if ( ! $attached ) {
+				$wpdb->update(
+					$table_webhooks,
+					array( 'status' => 'failed', 'received_at' => $now_date ),
+					array( 'file_code' => $file_code, 'event' => $event )
+				);
+				return new WP_REST_Response( array( 'success' => false, 'error' => 'Failed to persist repeatable_fields to new movie draft.' ), 500 );
+			}
 
 			$wpdb->update(
 				$table_webhooks,
@@ -698,10 +751,29 @@ class PeeStream_Webhook {
 			array_unshift( $repeatable, $server_entry );
 			$repeatable = array_values( $repeatable );
 			update_post_meta( $post_id, 'repeatable_fields', $repeatable );
+
+			// Strict verification: verify that repeatable_fields was successfully saved and contains the player
+			$fresh_meta = get_post_meta( $post_id, 'repeatable_fields', true );
+			if ( is_string( $fresh_meta ) ) {
+				$fresh_meta = maybe_unserialize( $fresh_meta );
+			}
+			$found = false;
+			if ( is_array( $fresh_meta ) ) {
+				foreach ( $fresh_meta as $srv ) {
+					if ( isset( $srv['url'] ) && stripos( $srv['url'], $file_code ) !== false ) {
+						$found = true;
+						break;
+					}
+				}
+			}
+			if ( ! $found ) {
+				return false;
+			}
 		}
 
 		update_post_meta( $post_id, 'peestream_code', $file_code );
 		update_post_meta( $post_id, 'peestream_embed_url', $embed_url );
+		return true;
 	}
 
 	private function get_default_author_id() {

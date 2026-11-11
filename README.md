@@ -60,7 +60,7 @@ The official high-performance video player, automation suite, and safe competito
 
 ## Installation
 
-1. Download the release package `peestream-wp-dooplay_v1.0.2.zip`.
+1. Download the release package `peestream-wp-dooplay_v1.0.3.zip`.
 2. Go to **WordPress Admin -> Plugins -> Add New -> Upload Plugin** and select the ZIP file.
 3. Click **Install Now** and activate the plugin.
 4. Go to **PeeStream -> Settings** in your WordPress admin menu.
@@ -88,6 +88,15 @@ array(
 ---
 
 ## Changelog
+
+### Version 1.0.3
+- **Unified Manual Migration Locking:** `ajax_process_batch()` is now fully integrated with `acquire_lock(120)`, periodic heartbeat lease extension, and safe `finally` unlock, ensuring AJAX Start Migration, AJAX Check Queue, and WP-Cron run mutually exclusively without racing or overwriting post metadata.
+- **Multi-Server Post Atomicity:** Posts containing multiple competitor links (e.g. 3 servers) now process each server link individually and atomically. Fresh post metadata is reloaded before each modification, distinct backup snapshots are stored in `wp_peestream_migration_backups`, and each server can be rolled back individually without corrupting other links.
+- **Idempotent Queue Pre-Reservation & UNIQUE Constraint:** Added `UNIQUE KEY uq_post_orig (post_id, original_url(191))` to the migration queue table. Tasks are atomically pre-reserved in the database before calling PeeStream's `/api/upload/url`, eliminating duplicate remote upload calls on concurrent requests.
+- **Strict DB Schema Compliance Verification:** `create_tables()` strictly verifies the actual presence of all mandatory columns across all three tables and validates both UNIQUE indexes (`uq_fc_event` and `uq_post_orig`). Schema version is bumped to `104` and is only recorded after all verifications succeed.
+- **Consistent UTC Timestamps & Timezone Safety:** Switched all timestamp writes (`backup_time`, `created_at`, `updated_at`, `received_at`) and comparison cutoffs (`recover_partial_failures()`, `process_queue_batch()`) to consistent UTC (`current_time('mysql', true)` and `gmdate()`), eliminating bugs caused by WordPress local timezone offsets (`gmt_offset`).
+- **Eliminated Webhook Draft Crash Window:** Passed metadata directly in `wp_insert_post( 'meta_input' => ... )` and added title-based draft querying, preventing duplicate draft creation even if a crash occurs immediately after post insertion.
+- **Verified Server Attachment in Webhook:** `attach_server_to_post()` verifies that `repeatable_fields` actually persisted to the database; failures return HTTP 500 and set audit status to `'failed'` instead of `'processed'`.
 
 ### Version 1.0.2
 > **Note:** Version 1.0.1 was a pre-release build pending final architectural review. Version 1.0.2 is the recommended, fully verified stable release.
