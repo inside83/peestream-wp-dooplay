@@ -39,6 +39,7 @@ final class PeeStream_Plugin {
 	private function load_dependencies() {
 		require_once PEESTREAM_PLUGIN_DIR . 'includes/class-peestream-admin.php';
 		require_once PEESTREAM_PLUGIN_DIR . 'includes/class-peestream-metabox.php';
+		require_once PEESTREAM_PLUGIN_DIR . 'includes/class-peestream-migrator.php';
 	}
 
 	private function init_hooks() {
@@ -47,6 +48,7 @@ final class PeeStream_Plugin {
 		if ( is_admin() ) {
 			new PeeStream_Admin();
 			new PeeStream_Metabox();
+			new PeeStream_Migrator();
 		}
 	}
 
