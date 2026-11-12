@@ -1,5 +1,6 @@
 ======================================================================
-ISOLATED CMS END-TO-END STAGING TEST RUNNER (WP/DOOPLAY & DLE)
+STANDALONE MOCK SIMULATION (SQLite Harness - NOT LIVE CMS E2E)
+Live CMS Runtime Status: NOT RUN (Staging CMS environments unavailable)
 ======================================================================
 
 >>> PART 1: DataLife Engine (DLE) End-to-End Integration Scenario <<<

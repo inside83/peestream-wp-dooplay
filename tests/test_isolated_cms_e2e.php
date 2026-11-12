@@ -1,13 +1,13 @@
 <?php
 /**
- * Isolated CMS End-to-End Staging Test Runner (WordPress/DooPlay & DataLife Engine)
- * File: /root/gemini_stuff/staging_e2e/test_isolated_cms_e2e.php
+ * Standalone Integration Mock (SQLite Simulation - NOT A LIVE CMS E2E TEST)
+ * File: test_isolated_cms_e2e.php
  * 
- * Strict Isolation Mandate:
- * - Operates entirely in /root/gemini_stuff/tmp/e2e_* scratch folders.
- * - Zero access to production MySQL databases or active CyberPanel vhosts.
- * - Unpacks real RC ZIP archives, tests installation, multi-server migration,
- *   webhooks, recovery, surgical rollback, and schema upgrades.
+ * AUDIT NOTICE:
+ * This script tests archive unpacking, manifest validation, and data transformation
+ * logic using a standalone SQLite mock database. It DOES NOT boot a live WordPress
+ * or DataLife Engine CMS environment.
+ * Live CMS E2E on real installations remains: NOT RUN.
  */
 
 error_reporting(E_ALL);
@@ -28,7 +28,8 @@ function e2e_assert($desc, $cond) {
 }
 
 echo "======================================================================\n";
-echo "ISOLATED CMS END-TO-END STAGING TEST RUNNER (WP/DOOPLAY & DLE)\n";
+echo "STANDALONE MOCK SIMULATION (SQLite Harness - NOT LIVE CMS E2E)\n";
+echo "Live CMS Runtime Status: NOT RUN (Staging CMS environments unavailable)\n";
 echo "======================================================================\n\n";
 
 // ======================================================================
