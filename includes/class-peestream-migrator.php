@@ -512,17 +512,21 @@ class PeeStream_Migrator {
 				// Process each competitor server individually & atomically
 				foreach ( $links_to_process as $lp ) {
 					if ( $lock_token ) {
-						self::extend_lock( $lock_token, 120 );
+						if ( ! self::extend_lock( $lock_token, 120 ) ) {
+							$failed_count++;
+							$logs[] = sprintf( '[LOCK LOST] Post #%d: Global lock lease lost or expired. Halting migration immediately.', $p_id );
+							break 2;
+						}
 					}
 					$url      = $lp['url'];
 					$detected = $lp['detected'];
 					$url_hash = self::url_hash( $url );
 					$worker_token = ( ! empty( $lock_token ) && is_string( $lock_token ) ) ? $lock_token : ( self::$owner_token ?: wp_generate_password( 32, false ) );
 
-					// Check if already in persistent queue
+					// Check if already in persistent queue (binary-exact URL comparison fallback)
 					$existing_queue = $wpdb->get_row(
 						$wpdb->prepare(
-							"SELECT * FROM {$table_queue} WHERE post_id = %d AND (url_hash = %s OR original_url = %s)",
+							"SELECT * FROM {$table_queue} WHERE post_id = %d AND (url_hash = %s OR (url_hash = '' AND BINARY original_url = %s))",
 							$p_id,
 							$url_hash,
 							$url
@@ -608,7 +612,7 @@ class PeeStream_Migrator {
 								// Duplicate collision or DB error! Check existing record
 								$existing_queue = $wpdb->get_row(
 									$wpdb->prepare(
-										"SELECT * FROM {$table_queue} WHERE post_id = %d AND (url_hash = %s OR original_url = %s)",
+										"SELECT * FROM {$table_queue} WHERE post_id = %d AND (url_hash = %s OR (url_hash = '' AND BINARY original_url = %s))",
 										$p_id,
 										$url_hash,
 										$url
@@ -891,6 +895,31 @@ class PeeStream_Migrator {
 						}
 
 						$meta_to_save = array_values( $updated_meta );
+
+						// Guard: verify lock ownership immediately before postmeta update
+						if ( $lock_token ) {
+							if ( ! self::extend_lock( $lock_token, 120 ) ) {
+								$wpdb->update(
+									$table_backups,
+									array( 'status' => 'apply_failed' ),
+									array( 'id' => $link_backup_id )
+								);
+								$wpdb->update(
+									$table_queue,
+									array(
+										'state'      => 'apply_failed',
+										'status'     => 'failed',
+										'error_msg'  => 'Global lock lease lost immediately before postmeta update. Aborted for safety.',
+										'updated_at' => current_time( 'mysql', true ),
+									),
+									array( 'id' => $queue_id )
+								);
+								$failed_count++;
+								$logs[] = sprintf( '[LOCK LOST] Post #%d: Global lock lost before applying postmeta. Modification aborted.', $p_id );
+								break 2;
+							}
+						}
+
 						update_post_meta( $p_id, 'repeatable_fields', $meta_to_save );
 
 						// Strict verification: verify that post meta was indeed persisted
@@ -1087,7 +1116,12 @@ class PeeStream_Migrator {
 
 		foreach ( $pending_items as $item ) {
 			// Extend lock lease on each task (heartbeat) so active worker is never usurped by timeout
-			self::extend_lock( self::$owner_token, 120 );
+			if ( self::$owner_token ) {
+				if ( ! self::extend_lock( self::$owner_token, 120 ) ) {
+					$logs[] = '[LOCK LOST] Queue batch worker lost global lock lease. Halting queue processing immediately.';
+					break;
+				}
+			}
 
 			// Check execution time budget to prevent exceeding PHP max_execution_time
 			if ( ( time() - $start_time ) >= $max_execution_time ) {
@@ -1300,6 +1334,32 @@ class PeeStream_Migrator {
 
 				if ( $post_modified ) {
 					$meta_to_save = array_values( $meta );
+
+					// Guard: verify lock ownership immediately before postmeta update
+					if ( self::$owner_token ) {
+						if ( ! self::extend_lock( self::$owner_token, 120 ) ) {
+							if ( $backup_id > 0 ) {
+								$wpdb->update(
+									$table_backups,
+									array( 'status' => 'apply_failed' ),
+									array( 'id' => $backup_id )
+								);
+							}
+							$wpdb->update(
+								$table_queue,
+								array(
+									'state'      => 'apply_failed',
+									'status'     => 'failed',
+									'error_msg'  => 'Global lock lease lost immediately before postmeta update. Aborted for safety.',
+									'updated_at' => current_time( 'mysql', true ),
+								),
+								array( 'id' => (int) $item['id'] )
+							);
+							$logs[] = sprintf( '[LOCK LOST] Post #%d: Global lock lost before applying postmeta. Modification aborted.', $p_id );
+							break;
+						}
+					}
+
 					update_post_meta( $p_id, 'repeatable_fields', $meta_to_save );
 
 					// Strict verification of persisted repeatable_fields
@@ -1534,6 +1594,14 @@ class PeeStream_Migrator {
 			$post_id  = (int) $b['post_id'];
 			$new_code = trim( (string) $b['new_code'] );
 			$orig_url = trim( (string) $b['migrated_url'] );
+			$mode     = ! empty( $b['mode'] ) ? trim( (string) $b['mode'] ) : 'replace';
+
+			// Verify post still exists in DB
+			$post = get_post( $post_id );
+			if ( ! $post || ( isset( $post->post_status ) && 'trash' === $post->post_status ) ) {
+				$wpdb->update( $table_backups, array( 'status' => 'post_deleted' ), array( 'id' => (int) $b['id'] ) );
+				continue;
+			}
 
 			$current_meta = get_post_meta( $post_id, 'repeatable_fields', true );
 			if ( is_string( $current_meta ) ) {
@@ -1544,33 +1612,60 @@ class PeeStream_Migrator {
 			}
 
 			$has_player = false;
+			$has_orig   = false;
 			foreach ( $current_meta as $srv ) {
-				if ( isset( $srv['url'] ) && ( strpos( $srv['url'], '/e/' . $new_code ) !== false || $srv['url'] === $new_code ) ) {
-					$has_player = true;
-					break;
+				if ( isset( $srv['url'] ) ) {
+					$srv_url = trim( (string) $srv['url'] );
+					if ( strpos( $srv_url, '/e/' . $new_code ) !== false || $srv_url === $new_code ) {
+						$has_player = true;
+					}
+					if ( $srv_url === $orig_url ) {
+						$has_orig = true;
+					}
 				}
 			}
 
+			// Mode-aware verification of concrete post mutation
+			$is_verified_migration = false;
+			if ( 'replace' === $mode ) {
+				$is_verified_migration = ( $has_player && ! $has_orig );
+			} elseif ( 'primary' === $mode ) {
+				$is_verified_migration = ( $has_player && $has_orig );
+			}
+
 			$url_hash = self::url_hash( $orig_url );
-			if ( $has_player ) {
+			if ( $is_verified_migration ) {
 				// Post modification was actually completed before interruption
 				$wpdb->update( $table_backups, array( 'status' => 'completed' ), array( 'id' => (int) $b['id'] ) );
 				$wpdb->query( $wpdb->prepare(
-					"UPDATE {$table_queue} SET status = 'completed', state = 'ready', updated_at = %s WHERE post_id = %d AND (url_hash = %s OR original_url = %s)",
+					"UPDATE {$table_queue} 
+					 SET status = 'completed', state = 'ready', updated_at = %s 
+					 WHERE post_id = %d 
+					   AND (url_hash = %s OR (url_hash = '' AND BINARY original_url = %s)) 
+					   AND status != 'completed' 
+					   AND (owner_token = '' OR updated_at < %s)",
 					current_time( 'mysql', true ),
 					$post_id,
 					$url_hash,
-					$orig_url
+					$orig_url,
+					$cutoff
 				) );
 			} else {
 				// Post modification was interrupted or failed: mark backup as apply_failed and queue as pending for safe retry
+				// Do not touch tasks that are already completed or actively owned by another running worker
 				$wpdb->update( $table_backups, array( 'status' => 'apply_failed' ), array( 'id' => (int) $b['id'] ) );
 				$wpdb->query( $wpdb->prepare(
-					"UPDATE {$table_queue} SET status = 'pending', error_msg = 'Recovered from interrupted partial update', updated_at = %s WHERE post_id = %d AND (url_hash = %s OR original_url = %s)",
+					"UPDATE {$table_queue} 
+					 SET status = 'pending', error_msg = 'Recovered from interrupted partial update', updated_at = %s 
+					 WHERE post_id = %d 
+					   AND (url_hash = %s OR (url_hash = '' AND BINARY original_url = %s)) 
+					   AND status != 'completed' 
+					   AND (owner_token = '' OR updated_at < %s)",
 					current_time( 'mysql', true ),
 					$post_id,
 					$url_hash,
-					$orig_url
+					$orig_url,
+					$cutoff
 				) );
 			}
 		}

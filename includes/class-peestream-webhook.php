@@ -438,7 +438,15 @@ class PeeStream_Webhook {
 			} else {
 				$author_id = $this->get_default_author_id();
 
-				$wpdb->query( 'START TRANSACTION' );
+				$tx_started = $wpdb->query( 'START TRANSACTION' );
+				if ( false === $tx_started ) {
+					$wpdb->update(
+						$table_webhooks,
+						array( 'status' => 'failed', 'received_at' => $now_date ),
+						array( 'file_code' => $file_code, 'event' => $event )
+					);
+					return new WP_REST_Response( array( 'success' => false, 'error' => 'Database transaction start failed.' ), 500 );
+				}
 				$is_new_transaction = true;
 
 				$new_post_id = wp_insert_post( array(
@@ -467,12 +475,28 @@ class PeeStream_Webhook {
 					return new WP_REST_Response( array( 'success' => false, 'error' => $err_msg ), 500 );
 				}
 
-				// Immediately link post ID to webhook audit record inside atomic transaction
+				// Immediately link post ID to webhook audit record inside atomic transaction and verify link
 				$wpdb->update(
 					$table_webhooks,
 					array( 'post_id' => $new_post_id ),
 					array( 'file_code' => $file_code, 'event' => $event )
 				);
+
+				$verify_link = (int) $wpdb->get_var( $wpdb->prepare(
+					"SELECT post_id FROM {$table_webhooks} WHERE file_code = %s AND event = %s",
+					$file_code,
+					$event
+				) );
+
+				if ( $verify_link !== (int) $new_post_id ) {
+					$wpdb->query( 'ROLLBACK' );
+					$wpdb->update(
+						$table_webhooks,
+						array( 'status' => 'failed', 'received_at' => $now_date ),
+						array( 'file_code' => $file_code, 'event' => $event )
+					);
+					return new WP_REST_Response( array( 'success' => false, 'error' => 'Failed to verify webhook audit linking to episode draft.' ), 500 );
+				}
 			}
 
 			// Assign DooPlay metadata
@@ -500,7 +524,16 @@ class PeeStream_Webhook {
 			}
 
 			if ( $is_new_transaction ) {
-				$wpdb->query( 'COMMIT' );
+				$committed = $wpdb->query( 'COMMIT' );
+				if ( false === $committed ) {
+					$wpdb->query( 'ROLLBACK' );
+					$wpdb->update(
+						$table_webhooks,
+						array( 'status' => 'failed', 'received_at' => $now_date ),
+						array( 'file_code' => $file_code, 'event' => $event )
+					);
+					return new WP_REST_Response( array( 'success' => false, 'error' => 'Failed to commit episode transaction.' ), 500 );
+				}
 			}
 
 			$wpdb->update(
@@ -516,6 +549,16 @@ class PeeStream_Webhook {
 					'event'     => $event,
 				)
 			);
+
+			$audit_processed = $wpdb->get_var( $wpdb->prepare(
+				"SELECT status FROM {$table_webhooks} WHERE file_code = %s AND event = %s",
+				$file_code,
+				$event
+			) );
+
+			if ( 'processed' !== $audit_processed ) {
+				return new WP_REST_Response( array( 'success' => false, 'error' => 'Failed to verify webhook audit record promotion to processed.' ), 500 );
+			}
 
 			return new WP_REST_Response( array(
 				'success'   => true,
@@ -679,7 +722,15 @@ class PeeStream_Webhook {
 			} else {
 				$author_id  = $this->get_default_author_id();
 
-				$wpdb->query( 'START TRANSACTION' );
+				$tx_started = $wpdb->query( 'START TRANSACTION' );
+				if ( false === $tx_started ) {
+					$wpdb->update(
+						$table_webhooks,
+						array( 'status' => 'failed', 'received_at' => $now_date ),
+						array( 'file_code' => $file_code, 'event' => $event )
+					);
+					return new WP_REST_Response( array( 'success' => false, 'error' => 'Database transaction start failed.' ), 500 );
+				}
 				$is_new_transaction = true;
 
 				$meta_input = array(
@@ -710,12 +761,28 @@ class PeeStream_Webhook {
 					return new WP_REST_Response( array( 'success' => false, 'error' => $err_msg ), 500 );
 				}
 
-				// Immediately link post ID to webhook audit record inside atomic transaction
+				// Immediately link post ID to webhook audit record inside atomic transaction and verify link
 				$wpdb->update(
 					$table_webhooks,
 					array( 'post_id' => $new_post_id ),
 					array( 'file_code' => $file_code, 'event' => $event )
 				);
+
+				$verify_link = (int) $wpdb->get_var( $wpdb->prepare(
+					"SELECT post_id FROM {$table_webhooks} WHERE file_code = %s AND event = %s",
+					$file_code,
+					$event
+				) );
+
+				if ( $verify_link !== (int) $new_post_id ) {
+					$wpdb->query( 'ROLLBACK' );
+					$wpdb->update(
+						$table_webhooks,
+						array( 'status' => 'failed', 'received_at' => $now_date ),
+						array( 'file_code' => $file_code, 'event' => $event )
+					);
+					return new WP_REST_Response( array( 'success' => false, 'error' => 'Failed to verify webhook audit linking to movie draft.' ), 500 );
+				}
 			}
 
 			if ( ! empty( $imdb_id ) ) {
@@ -739,7 +806,16 @@ class PeeStream_Webhook {
 			}
 
 			if ( $is_new_transaction ) {
-				$wpdb->query( 'COMMIT' );
+				$committed = $wpdb->query( 'COMMIT' );
+				if ( false === $committed ) {
+					$wpdb->query( 'ROLLBACK' );
+					$wpdb->update(
+						$table_webhooks,
+						array( 'status' => 'failed', 'received_at' => $now_date ),
+						array( 'file_code' => $file_code, 'event' => $event )
+					);
+					return new WP_REST_Response( array( 'success' => false, 'error' => 'Failed to commit movie transaction.' ), 500 );
+				}
 			}
 
 			$wpdb->update(
@@ -755,6 +831,16 @@ class PeeStream_Webhook {
 					'event'     => $event,
 				)
 			);
+
+			$audit_processed = $wpdb->get_var( $wpdb->prepare(
+				"SELECT status FROM {$table_webhooks} WHERE file_code = %s AND event = %s",
+				$file_code,
+				$event
+			) );
+
+			if ( 'processed' !== $audit_processed ) {
+				return new WP_REST_Response( array( 'success' => false, 'error' => 'Failed to verify webhook audit record promotion to processed.' ), 500 );
+			}
 
 			return new WP_REST_Response( array(
 				'success'   => true,

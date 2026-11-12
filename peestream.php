@@ -219,19 +219,54 @@ final class PeeStream_Plugin {
 		// Ensure full 256-bit binary-safe UNIQUE KEY uq_post_urlhash (archive duplicates safely first)
 		$idx_urlhash = $wpdb->get_results( "SHOW INDEX FROM `{$table_queue}` WHERE Key_name = 'uq_post_urlhash'" );
 		if ( empty( $idx_urlhash ) ) {
-			$now_utc = current_time( 'mysql', true );
-			// Safely preserve historical duplicates in archive table prior to unique key
-			$wpdb->query( "INSERT IGNORE INTO `{$table_archive}` 
-			               (original_queue_id, post_id, original_url, url_hash, filecode, mode, server_name, language, quality, state, retry_count, error_msg, original_repeatable, created_at, updated_at, archived_at, status, owner_token)
-			               SELECT q1.id, q1.post_id, q1.original_url, q1.url_hash, q1.filecode, q1.mode, q1.server_name, q1.language, q1.quality, q1.state, q1.retry_count, q1.error_msg, q1.original_repeatable, q1.created_at, q1.updated_at, '{$now_utc}', q1.status, q1.owner_token
-			               FROM `{$table_queue}` q1
-			               INNER JOIN `{$table_queue}` q2
-			               WHERE q1.id < q2.id AND q1.post_id = q2.post_id AND ( (q1.url_hash != '' AND q1.url_hash = q2.url_hash) OR q1.original_url = q2.original_url )" );
+			// 1. Identify exact duplicate queue row IDs to be archived
+			$dup_ids = $wpdb->get_col(
+				"SELECT DISTINCT q1.id
+				 FROM `{$table_queue}` q1
+				 INNER JOIN `{$table_queue}` q2
+				 WHERE q1.id < q2.id AND q1.post_id = q2.post_id 
+				   AND ( (q1.url_hash != '' AND q1.url_hash = q2.url_hash) OR q1.original_url = q2.original_url )"
+			);
 
-			// Remove duplicate older entries from active queue
-			$wpdb->query( "DELETE q1 FROM `{$table_queue}` q1
-			               INNER JOIN `{$table_queue}` q2
-			               WHERE q1.id < q2.id AND q1.post_id = q2.post_id AND ( (q1.url_hash != '' AND q1.url_hash = q2.url_hash) OR q1.original_url = q2.original_url )" );
+			if ( ! empty( $dup_ids ) ) {
+				$expected_count = count( $dup_ids );
+				$id_placeholders = implode( ',', array_map( 'intval', $dup_ids ) );
+				$now_utc = current_time( 'mysql', true );
+
+				// 2. Archive duplicates preserving original_queue_id
+				$ins_archive = $wpdb->query(
+					"INSERT IGNORE INTO `{$table_archive}` 
+					 (original_queue_id, post_id, original_url, url_hash, filecode, mode, server_name, language, quality, state, retry_count, error_msg, original_repeatable, created_at, updated_at, archived_at, status, owner_token)
+					 SELECT q.id, q.post_id, q.original_url, q.url_hash, q.filecode, q.mode, q.server_name, q.language, q.quality, q.state, q.retry_count, q.error_msg, q.original_repeatable, q.created_at, q.updated_at, '{$now_utc}', q.status, q.owner_token
+					 FROM `{$table_queue}` q
+					 WHERE q.id IN ({$id_placeholders})"
+				);
+
+				if ( false === $ins_archive ) {
+					// Archiving failed: ABORT migration immediately! Do NOT delete any rows!
+					return false;
+				}
+
+				// 3. Strictly verify that all duplicate rows are now safely stored in the archive table
+				$archived_ids = $wpdb->get_col(
+					"SELECT DISTINCT original_queue_id FROM `{$table_archive}` WHERE original_queue_id IN ({$id_placeholders})"
+				);
+				$archived_count = is_array( $archived_ids ) ? count( $archived_ids ) : 0;
+
+				if ( $archived_count !== $expected_count ) {
+					// Archive count mismatch: ABORT migration! Original rows remain untouched!
+					return false;
+				}
+
+				// 4. Verification confirmed: Safely delete only the archived duplicate rows from active queue
+				$del_res = $wpdb->query(
+					"DELETE FROM `{$table_queue}` WHERE id IN ({$id_placeholders})"
+				);
+
+				if ( false === $del_res ) {
+					return false;
+				}
+			}
 
 			// Drop legacy prefix-truncated index if present
 			$wpdb->query( "ALTER TABLE `{$table_queue}` DROP INDEX uq_post_orig" );

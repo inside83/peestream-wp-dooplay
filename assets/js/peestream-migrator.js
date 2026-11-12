@@ -230,6 +230,9 @@
 			if (totalFailed > 0 || totalBatchErrors > 0) {
 				$progressStatus.text('Migration finished with issues. ' + summary);
 				log('=== [FINISHED WITH ISSUES] ' + summary + ' ===');
+			} else if (totalCompleted === 0 && totalPending > 0) {
+				$progressStatus.text('Queued / Pending encoding. ' + summary);
+				log('=== [QUEUED / PENDING ENCODING] ' + summary + ' ===');
 			} else {
 				$progressStatus.text('Batch migration complete! ' + summary);
 				log('=== [FINISHED] All candidate posts processed successfully. ' + summary + ' ===');
