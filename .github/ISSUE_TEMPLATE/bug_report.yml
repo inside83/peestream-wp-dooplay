@@ -1,0 +1,50 @@
+name: Bug report
+description: Report a reproducible issue with the PeeStream WordPress or DooPlay integration.
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: "This beta has not been tested on a live WordPress/DooPlay installation. Use staging only. Never include API keys, passwords, or private URLs."
+  - type: input
+    id: version
+    attributes:
+      label: PeeStream plugin version
+      placeholder: "1.0.4-beta.1"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: WordPress, DooPlay, PHP, and database versions
+      placeholder: "WordPress 6.x; DooPlay 2.5.x; PHP 8.2; MariaDB 10.x"
+    validations:
+      required: true
+  - type: dropdown
+    id: installation
+    attributes:
+      label: Test environment
+      options:
+        - Staging / local
+        - Production (not recommended for beta)
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Describe the smallest reproducible sequence using test data.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and sanitized logs
+      description: Redact tokens, credentials, private URLs, and personal information.
+    validations:
+      required: true

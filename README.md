@@ -1,6 +1,16 @@
-# PeeStream for WordPress & DooPlay
+<p align="center">
+  <a href="https://peestream.com"><img src="assets/images/peestream-logo.png" alt="PeeStream logo" width="96"></a>
+</p>
+<h1 align="center">PeeStream for WordPress & DooPlay</h1>
+<p align="center"><strong>Video player integration, remote import, and controlled video-link migration for WordPress publishers.</strong></p>
+<p align="center">
+  <a href="https://peestream.com">PeeStream</a> ·
+  <a href="https://github.com/PeeStream/peestream-wp-dooplay/releases">Releases</a> ·
+  <a href="https://github.com/PeeStream/peestream-wp-dooplay/issues">Report an issue</a>
+</p>
+<p align="center"><strong>v1.0.4-beta.1 planned</strong> · <strong>Staging only</strong> · <strong>Live CMS E2E: NOT RUN</strong></p>
 
-The official high-performance video player, automation suite, and safe competitor migrator for **PeeStream** (`peestream.com` / `peeplayer.com`). Tailored for high-traffic movie & TV show streaming portals running the **DooPlay** theme (2.5.x) or generic WordPress themes.
+This official PeeStream integration is designed for the DooPlay 2.5.x theme and also provides a universal shortcode for other WordPress themes. It connects your existing PeeStream account to WordPress without modifying DooPlay's core templates.
 
 > [!WARNING]
 > **BETA RELEASE (v1.0.4-beta.1) — NOT PRODUCTION TESTED**
@@ -64,7 +74,7 @@ The official high-performance video player, automation suite, and safe competito
 
 ## Installation
 
-1. Download the release package `peestream-wp-dooplay_v1.0.4.zip` (or Release Candidate `peestream-wp-dooplay_v1.0.4-RC.zip`).
+1. When published, download the **beta** package `peestream-wp-dooplay_v1.0.4-beta.1.zip` from the [GitHub Releases page](https://github.com/PeeStream/peestream-wp-dooplay/releases). Do not use this beta on a production site.
 2. Go to **WordPress Admin -> Plugins -> Add New -> Upload Plugin** and select the ZIP file.
 3. Click **Install Now** and activate the plugin.
 4. Go to **PeeStream -> Settings** in your WordPress admin menu.
@@ -93,7 +103,7 @@ array(
 
 ## Changelog
 
-### Version 1.0.4
+### Version 1.0.4 (beta; not tested on a live WordPress/DooPlay installation)
 - **Binary-Safe Case-Sensitive URL Deduplication:** Enforced SHA-256 identity (`url_hash`) and `BINARY original_url` comparison in database migration deduplication and queue reservation, preventing case-sensitive video URLs from colliding on case-insensitive collations.
 - **Fail-Safe Deduplication Archiving:** Upgrades safely archive duplicate queue items to `wp_peestream_migration_queue_archive` before adding unique index `uq_post_urlhash`; any SQL error halts migration with zero data loss.
 - **Lock Lease Hardening:** Loss of global processing lock immediately stops post metadata modifications.
@@ -110,7 +120,7 @@ array(
 - **Verified Server Attachment in Webhook:** `attach_server_to_post()` verifies that `repeatable_fields` actually persisted to the database; failures return HTTP 500 and set audit status to `'failed'` instead of `'processed'`.
 
 ### Version 1.0.2
-> **Note:** Version 1.0.1 was a pre-release build pending final architectural review. Version 1.0.2 is the recommended, fully verified stable release.
+> **Note:** v1.0.4-beta.1 has not undergone end-to-end testing on a running WordPress/DooPlay installation. Consult the release notes and validate any version in a staging environment before deploying it.
 
 - **Queue Lock Lease Extension & Time Budgeting:** Replaced fixed 120s queue lock timeout with per-task heartbeat lease extension (`extend_lock`) and execution time budgeting (`max_execution_time`). Slow API responses can no longer cause an active worker's lock to expire and be usurped by a concurrent worker.
 - **Atomic Lock Release by Owner Token:** Implemented atomic SQL conditional deletion (`DELETE FROM wp_options WHERE option_name = %s AND option_value LIKE %s`), ensuring a worker can only release its own lock token and cannot clear locks acquired by another process.
