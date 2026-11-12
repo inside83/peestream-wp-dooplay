@@ -1,0 +1,192 @@
+=======================================================
+PeeStream WordPress & DooPlay Addon Automated Test Suite
+=======================================================
+
+[PASS] Plugin activate initializes peestream_settings default options
+[PASS] Default auto_create_posts is 0 (Disabled per P0 security requirement)
+[PASS] Admin settings trims API key
+[PASS] Admin settings enforces HTTPS on player_domain
+[PASS] Admin settings enforces HTTPS on api_domain
+[PASS] Admin settings validates webhook secret minimum length (regenerates if < 16 chars)
+[PASS] Streamtape domain matches confirmed hoster
+[PASS] MixDrop domain matches confirmed hoster
+[PASS] VOE domain matches confirmed hoster
+[PASS] StreamWish domain matches confirmed hoster
+[PASS] EarnVids / VidHide domain matches confirmed hoster
+[PASS] PixelDrain domain matches confirmed hoster
+[PASS] PeeStream itself is NEVER matched as competitor
+[PASS] Doodstream is excluded from confirmed hosters (fails PeeStream remote upload)
+[PASS] Filemoon is excluded from confirmed hosters (fails PeeStream remote upload)
+[PASS] LuluStream / Vinovo is excluded from confirmed hosters (fails PeeStream remote upload)
+{"success":true,"data":{"message":"Player added to DooPlay successfully!","table_html":"<table class=\"peestream-mb-table widefat striped\"><thead><tr><th>#<\/th><th>Server Name<\/th><th>Type<\/th><th>Language<\/th><th>Quality<\/th><th>Player URL<\/th><th style=\"width:80px;text-align:center;\">Action<\/th><\/tr><\/thead><tbody><tr><td><strong>1<\/strong><\/td><td>PeeStream Player <span class=\"peestream-tag-pst\">PeeStream<\/span><\/td><td><code>iframe<\/code><\/td><td>English<\/td><td><span class=\"peestream-quality-badge\">1080p<\/span><\/td><td class=\"peestream-url-cell\" title=\"https:\/\/peeplayer.com\/e\/matr1x01\">https:\/\/peeplayer.com\/e\/matr1x01<\/td><td style=\"text-align:center;\"><button type=\"button\" class=\"button button-small button-link-delete pst-btn-remove-row\" data-index=\"0\"><span class=\"dashicons dashicons-trash\"><\/span><\/button><\/td><\/tr><tr><td><strong>2<\/strong><\/td><td>Server 1 <\/td><td><code>iframe<\/code><\/td><td>English<\/td><td><span class=\"peestream-quality-badge\">1080p<\/span><\/td><td class=\"peestream-url-cell\" title=\"https:\/\/streamtape.com\/v\/test_matrix\">https:\/\/streamtape.com\/v\/test_matrix<\/td><td style=\"text-align:center;\"><button type=\"button\" class=\"button button-small button-link-delete pst-btn-remove-row\" data-index=\"1\"><span class=\"dashicons dashicons-trash\"><\/span><\/button><\/td><\/tr><\/tbody><\/table>","count":2,"file_code":"matr1x01","embed_url":"https:\/\/peeplayer.com\/e\/matr1x01"}}[PASS] Metabox adds new PeeStream player successfully
+[PASS] Post has 2 repeatable_fields after primary add
+[PASS] PeeStream player was prepended as Server 1
+{"success":false,"data":{"message":"This PeeStream video is already attached to this post."}}[PASS] Metabox blocks duplicate player insertion
+[PASS] Post still has exactly 2 repeatable_fields (no duplicate created)
+{"success":true,"data":{"processed_count":0,"completed_count":0,"pending_count":0,"failed_count":0,"skipped_count":0,"logs":["[DRY-RUN] Post #202 (Inception): Found Streamtape link (https:\/\/streamtape.com\/v\/inception_st). Would queue to PeeStream (Strategy: primary).","[DRY-RUN] Post #202 (Inception): Found MixDrop link (https:\/\/mixdrop.co\/f\/inception_md). Would queue to PeeStream (Strategy: primary)."]}}[PASS] Dry-run reports simulation logs
+[PASS] Dry-run leaves repeatable_fields completely unchanged
+[PASS] Dry-run leaves migration queue empty
+{"success":true,"data":{"processed_count":0,"completed_count":0,"pending_count":1,"failed_count":0,"skipped_count":0,"logs":["[QUEUED] Post #202: File inc_fc01 queued on PeeStream (pending). Original link untouched until ready."]}}[PASS] Migrator records item in persistent queue
+[PASS] Migrator item in queue has state 'pending'
+[PASS] Migrator DOES NOT alter repeatable_fields when canplay=0 (link preserved intact)
+{"success":true,"data":{"checked_count":1,"ready_count":1,"logs":["[READY] Post #202: Video inc_fc01 is ready! PeeStream player attached (Strategy: primary)."]}}[PASS] Queue poller detects ready state (canplay=1) from array result
+[PASS] Queue poller updates queue item to 'completed'
+[PASS] Queue poller creates backup before modifying
+[PASS] Repeatable fields now has PeeStream prepended as Server 1
+[PASS] Original Streamtape and MixDrop servers are preserved intact in tabs 2 and 3
+{"success":true,"data":{"processed_count":0,"completed_count":0,"pending_count":0,"failed_count":0,"skipped_count":1,"logs":["[SKIP] Post #202: Link https:\/\/streamtape.com\/v\/inception_st already successfully migrated (filecode: inc_fc01)."]}}[PASS] Re-running migration skips already completed queue items
+[PASS] Server count remains exactly 3 without duplication
+[PASS] Postmeta now has 4 servers before rollback
+{"success":true,"data":{"restored_count":1,"logs":["[ROLLBACK - PRIMARY] Post #202: Surgically restored server. Editorial additions preserved."],"message":"Surgical rollback completed: 1 posts reverted. Newer editorial changes preserved."}}[PASS] Rollback surgically removes PeeStream primary server
+[PASS] Rollback PRESERVED the editor added VIP server
+[PASS] Backup record is marked 'rolled_back'
+{"success":true,"data":{"processed_count":1,"completed_count":1,"pending_count":0,"failed_count":0,"skipped_count":0,"logs":["[READY - REPLACED] Post #103: Replaced Streamtape with PeeStream repl_fc99 (canplay=1)."]}}{"success":true,"data":{"checked_count":0,"ready_count":0,"logs":[]}}[PASS] Mode 'replace' replaces target server in-place without adding extra servers
+[PASS] Target server #1 URL is replaced with PeeStream URL
+[PASS] Target server #1 received user configured server_name
+[PASS] Target server #1 received user configured language
+[PASS] Second VOE server remained completely untouched
+[PASS] Cron schedule peestream_two_minutes exists
+[PASS] Cron queue worker moves timed out / max retried items to 'failed' status
+[PASS] Cron queue worker cleans concurrency lock transient upon completion
+[PASS] Webhook rejects non-POST requests with 405 Method Not Allowed
+[PASS] Webhook rejects invalid secret token with 401 or 403 Unauthorized
+[PASS] Webhook rejects missing file_code with 400 Bad Request
+[PASS] Webhook rejects unauthorized event type with 400 Bad Request
+[PASS] Webhook processes valid episode ready payload with 200 OK
+[PASS] Webhook attached player specifically to Breaking Bad S01E01 (ep #401)
+[PASS] Webhook DID NOT touch Better Call Saul S01E01 (ep #402, zero cross-contamination)
+[PASS] Webhook handles replayed request idempotently without duplicating
+[PASS] Webhook rejects ambiguous movies sharing duplicate IMDb ID with 409 Conflict
+[PASS] Ambiguous movie #1 remains untouched
+[PASS] Ambiguous movie #2 remains untouched
+[PASS] Webhook enforces 60 req/min rate limit with 429 Too Many Requests
+[PASS] Shortcode renders responsive player container
+[PASS] Shortcode uses HTTPS peeplayer.com embed domain
+[PASS] Shortcode sets allowfullscreen and sandbox properties
+[PASS] peestream.php does NOT contain CREATE TABLE IF NOT EXISTS (strict dbDelta rule)
+[PASS] peestream.php uses PRIMARY KEY  (id) with two spaces
+[PASS] peestream.php webhooks table defines UNIQUE KEY uq_fc_event
+[PASS] peestream.php queue table defines mode, server_name, language, quality columns
+[PASS] peestream.php backups table defines mode column
+[PASS] LICENSE file contains full GNU General Public License v2 text (> 10,000 bytes)
+[PASS] Replace mode strictly replaced only Server 1 (voe.sx/video1)
+[PASS] Second VOE server (voe.sx/video2) remained completely untouched in slot 2
+[PASS] Queue processor flags conflict status when target server was deleted in interim
+[PASS] Conflict post was NOT modified and no extra servers were appended
+{"success":true,"data":{"restored_count":3,"logs":["[ROLLBACK - REPLACE] Post #103: Surgically restored server. Editorial additions preserved.","[ROLLBACK - REPLACE] Post #901: Surgically restored server. Editorial additions preserved.","[ROLLBACK - PRIMARY] Post #903: Surgically restored server. Editorial additions preserved."],"message":"Surgical rollback completed: 3 posts reverted. Newer editorial changes preserved."}}[PASS] Primary rollback removes only PeeStream server (does not duplicate original server)
+[PASS] Primary rollback keeps original server in slot 1
+[PASS] Primary rollback preserves editor added server in slot 2
+{"success":true,"data":{"restored_count":1,"logs":["[ROLLBACK - REPLACE] Post #904: Surgically restored server. Editorial additions preserved."],"message":"Surgical rollback completed: 1 posts reverted. Newer editorial changes preserved."}}[PASS] Replace rollback restored original server URL
+[PASS] Replace rollback restored original server name ('MixDrop Fast')
+[PASS] Replace rollback restored original server language ('German')
+[PASS] Replace rollback restored original server quality ('720p')
+[PASS] Replace rollback preserved editor added VIP server
+[PASS] First parallel webhook request succeeds with 200 OK
+[PASS] Second parallel webhook collides on atomic pre-reservation and returns replay_ignored
+[PASS] Post has exactly 1 player attached (zero duplicate insertion under race condition)
+[PASS] PeeStream_Migrator::acquire_lock() returns unique owner token
+[PASS] PeeStream_Migrator::acquire_lock() returns false while active lock exists
+[PASS] PeeStream_Migrator::release_lock() with invalid token fails
+[PASS] PeeStream_Migrator::release_lock() with owner token succeeds
+[PASS] PeeStream_Migrator::acquire_lock() succeeds after release_lock()
+[PASS] Webhook does NOT falsely flag ambiguity on post having duplicate meta entries
+[PASS] Distinct movie was successfully updated
+[PASS] query_file_info() strictly returns false when filecode is not in result array (no fallback to result[0])
+[PASS] peestream_cron_process_queue is initially not scheduled
+[PASS] PeeStream_Plugin::ensure_cron_scheduled() automatically schedules WP-Cron
+
+--- 10. Final Review Hardening Invariants & Scenarios ---
+[PASS] PeeStream_Plugin defines decoupled DB_SCHEMA_VERSION = 105
+[PASS] Upgrade updates peestream_schema_version to 105
+[PASS] Legacy backup row mode is set to 'unknown' (NOT automatically 'replace')
+{"success":true,"data":{"restored_count":1,"logs":["[MANUAL REVIEW] Post #701: Backup mode is unknown and original link is missing. Flagged for manual resolution to prevent data overwrite.","[ROLLBACK - PRIMARY] Post #920: Surgically restored server. Editorial additions preserved."],"message":"Surgical rollback completed: 1 posts reverted. Newer editorial changes preserved."}}[PASS] Rollback unknown mode with original server present resolves as primary and removes PeeStream
+{"success":true,"data":{"restored_count":0,"logs":["[MANUAL REVIEW] Post #921: Backup mode is unknown and original link is missing. Flagged for manual resolution to prevent data overwrite."],"message":"Surgical rollback completed: 0 posts reverted. Newer editorial changes preserved."}}[PASS] Rollback unknown mode with missing original server flags manual_review
+[PASS] Rollback unknown mode with missing original server does NOT overwrite post servers
+[PASS] Primary mode detects deleted original URL and marks status = conflict
+[PASS] Primary mode does NOT attach player when conflict is detected
+[PASS] First manual AJAX check succeeds and releases lock
+[PASS] Second consecutive manual AJAX check succeeds without lock deadlock
+[PASS] Webhook allows controlled retry on 'failed' status and processes event
+[PASS] Retry successfully attached PeeStream player to post
+
+--- 11. Production Verification & Integrity Hardening Invariants ---
+[PASS] Worker A acquires initial lock
+[PASS] Worker A extends lock lease via heartbeat extend_lock()
+[PASS] Worker B is strictly rejected while Worker A lease is active
+[PASS] release_lock() with unowned/imposter token returns false and does NOT clear lock
+[PASS] Lock remains active after imposter release attempt
+[PASS] release_lock() with true owner token succeeds
+[PASS] Lock option is cleanly deleted by owner release
+[PASS] Failed post_meta update does NOT mark queue item completed
+[PASS] Failed post_meta update marks queue item failed with apply_failed error
+[PASS] Post repeatable_fields remains 100% intact when update verification fails
+[PASS] recover_partial_failures() detects interrupted in_progress backup without player and marks apply_failed
+[PASS] Webhook crash retry succeeds without error
+[PASS] Webhook crash retry re-uses existing draft and does NOT create duplicate post
+{"success":true,"data":{"restored_count":1,"logs":["[ROLLBACK - PRIMARY] Post #950: Surgically restored server. Editorial additions preserved."],"message":"Surgical rollback completed: 1 posts reverted. Newer editorial changes preserved."}}[PASS] Rollback on historical replace backup with original present reclassifies as primary and avoids duplicating original server
+
+--- 12. Release v1.0.3 Reviewer Requirements Hardening Tests ---
+[PASS] Simulate active worker lock acquisition
+{"success":false,"data":{"locked":true,"message":"Another migration process or queue worker is currently running. Please wait for it to finish."}}[PASS] Concurrent ajax_process_batch() is rejected with locked = true while active lock is held
+[PASS] Concurrent ajax_process_batch() returns error message regarding active process
+{"success":true,"data":{"processed_count":3,"completed_count":3,"pending_count":0,"failed_count":0,"skipped_count":0,"logs":["[READY - REPLACED] Post #960: Replaced Streamtape with PeeStream fc_multi1 (canplay=1).","[READY - REPLACED] Post #960: Replaced MixDrop with PeeStream fc_multi2 (canplay=1).","[READY - REPLACED] Post #960: Replaced VOE with PeeStream fc_multi3 (canplay=1)."]}}[PASS] Multi-server post: all 3 competitor servers replaced with PeeStream
+[PASS] Multi-server post: created exactly 3 distinct completed backup records
+{"success":true,"data":{"restored_count":1,"logs":["[ROLLBACK - REPLACE] Post #960: Surgically restored server. Editorial additions preserved."],"message":"Surgical rollback completed: 1 posts reverted. Newer editorial changes preserved."}}[PASS] Surgical rollback on multi-server post: restored Server 1 to original Streamtape
+[PASS] Surgical rollback on multi-server post: Server 2 remains intact PeeStream (fc_multi2)
+[PASS] Surgical rollback on multi-server post: Server 3 remains intact PeeStream (fc_multi3)
+{"success":true,"data":{"processed_count":0,"completed_count":0,"pending_count":0,"failed_count":0,"skipped_count":1,"logs":["[SKIP] Post #970: Link https:\/\/streamtape.com\/v\/idem_link already successfully migrated (filecode: fc_idem_done)."]}}[PASS] Pre-reserved / already migrated queue item skips remote upload API call
+[PASS] Pre-reserved / already migrated queue item logs skip message
+[PASS] create_tables() fails and returns false when required table column is missing
+[PASS] peestream_schema_version is NOT updated on schema verification failure
+[PASS] create_tables() fails and returns false when UNIQUE index uq_post_urlhash is missing
+[PASS] peestream_schema_version is NOT updated on missing index
+[PASS] create_tables() succeeds when all columns and unique keys are verified
+[PASS] peestream_schema_version is updated to 105 on verified schema
+[PASS] Webhook returns HTTP 500 when server attachment fails to persist
+[PASS] Webhook audit record is set to 'failed' (NOT 'processed') when post meta save fails
+
+--- 13. Release v1.0.4 Reviewer Invariant Tests ---
+[PASS] Webhook processes movie_ready with shared title successfully
+[PASS] Webhook did NOT re-use draft of Movie A (tt1111111) for Movie B (tt2222222)
+[PASS] Movie A draft remains untouched without Movie B player
+[PASS] Episode webhook does not attach Series Beta episode player to Series Alpha episode
+[PASS] Webhook returns 500 when draft metadata update fails
+[PASS] Transaction rolled back: no orphan post draft left in database
+[PASS] Webhook safely aborts with 500 when wp_insert_post returns 0
+{"success":true,"data":{"processed_count":0,"completed_count":0,"pending_count":0,"failed_count":1,"skipped_count":0,"logs":["[ERROR] Post #1301: Queue pre-reservation DB failure for https:\/\/streamtape.com\/v\/fail_res_url. Upload aborted."]}}[PASS] Pre-reservation INSERT failure strictly halts and does NOT call upload API
+[PASS] Pre-reservation failure reports error log and incremented failed_count
+{"success":true,"data":{"processed_count":0,"completed_count":0,"pending_count":0,"failed_count":1,"skipped_count":0,"logs":["[BUSY] Post #1401: Queue item for https:\/\/streamtape.com\/v\/concurrent_link is locked by another process or busy. Deferring."]}}[PASS] Concurrent worker does not trigger duplicate upload when queue row is locked
+[PASS] Concurrent reservation collision logs BUSY / defer message
+{"success":true,"data":{"processed_count":0,"completed_count":0,"pending_count":0,"failed_count":1,"skipped_count":0,"logs":["[ERROR] Post #1501: Backup status verification failed. Queue marked failed."]}}[PASS] Failed backup finalization is reported as failed_count in response
+[PASS] Failed backup finalization sets queue state to apply_failed
+[PASS] Failed backup finalization sets queue status to failed (NOT completed)
+[PASS] Long URLs share prefix longer than 191 chars
+[PASS] SHA-256 hashes of long URLs are completely distinct
+{"success":true,"data":{"processed_count":0,"completed_count":0,"pending_count":2,"failed_count":0,"skipped_count":0,"logs":["[QUEUED] Post #1601: File fc_long_1 queued on PeeStream (pending). Original link untouched until ready.","[QUEUED] Post #1601: File fc_long_2 queued on PeeStream (pending). Original link untouched until ready."]}}[PASS] Both long URLs queued without colliding on uq_post_urlhash
+[PASS] Batch reports pending_count = 2 for distinct long URLs
+[PASS] Admin batch response provides completed_count
+[PASS] Admin batch response provides pending_count
+[PASS] Admin batch response provides failed_count
+[PASS] Admin batch response provides skipped_count
+
+--- 14. Release v1.0.4 Rigorous Hardening Invariants (Reviewer Findings) ---
+[PASS] create_tables() returns false when archiving fails due to SQL error
+[PASS] Zero queue rows deleted when archiving duplicate fails
+{"success":false,"data":{"locked":true,"message":"Another migration process or queue worker is currently running. Please wait for it to finish."}}[PASS] ajax_process_batch() is rejected or halts when global lock is held by another worker
+[PASS] Post repeatable_fields is completely untouched when lock acquisition/lease is lost
+[PASS] Webhook returns HTTP 500 when START TRANSACTION fails
+[PASS] Webhook returns HTTP 500 when COMMIT fails
+[PASS] Binary URL check distinguishes case-sensitive token /v/abcd12 from legacy /v/AbCd12
+[PASS] Binary URL check correctly matches exact case token /v/AbCd12
+[PASS] create_tables() deduplication SQL enforces BINARY exact URL comparison
+[PASS] create_tables() succeeds with case-distinct URLs
+[PASS] Case-sensitive token URL 1 (/v/CaseDiffToken) is preserved in queue
+[PASS] Case-sensitive token URL 2 (/v/casedifftoken) is preserved in queue
+[PASS] recover_partial_failures() validates replace mode and promotes backup to completed
+[PASS] peestream-migrator.js checks for totalCompleted === 0 && totalPending > 0
+[PASS] peestream-migrator.js sets status text to Queued / Pending encoding
+[PASS] peestream-migrator.js logs [QUEUED / PENDING ENCODING]
+
+=======================================================
+Test Results: 174 PASSED, 0 FAILED
+=======================================================
