@@ -225,7 +225,7 @@ final class PeeStream_Plugin {
 				 FROM `{$table_queue}` q1
 				 INNER JOIN `{$table_queue}` q2
 				 WHERE q1.id < q2.id AND q1.post_id = q2.post_id 
-				   AND ( (q1.url_hash != '' AND q1.url_hash = q2.url_hash) OR q1.original_url = q2.original_url )"
+				   AND ( (q1.url_hash != '' AND q2.url_hash != '' AND q1.url_hash = q2.url_hash) OR (BINARY q1.original_url = BINARY q2.original_url) )"
 			);
 
 			if ( ! empty( $dup_ids ) ) {
