@@ -60,7 +60,7 @@ The official high-performance video player, automation suite, and safe competito
 
 ## Installation
 
-1. Download the release package `peestream-wp-dooplay_v1.0.3.zip`.
+1. Download the release package `peestream-wp-dooplay_v1.0.4.zip` (or Release Candidate `peestream-wp-dooplay_v1.0.4-RC.zip`).
 2. Go to **WordPress Admin -> Plugins -> Add New -> Upload Plugin** and select the ZIP file.
 3. Click **Install Now** and activate the plugin.
 4. Go to **PeeStream -> Settings** in your WordPress admin menu.
@@ -88,6 +88,13 @@ array(
 ---
 
 ## Changelog
+
+### Version 1.0.4
+- **Binary-Safe Case-Sensitive URL Deduplication:** Enforced SHA-256 identity (`url_hash`) and `BINARY original_url` comparison in database migration deduplication and queue reservation, preventing case-sensitive video URLs from colliding on case-insensitive collations.
+- **Fail-Safe Deduplication Archiving:** Upgrades safely archive duplicate queue items to `wp_peestream_migration_queue_archive` before adding unique index `uq_post_urlhash`; any SQL error halts migration with zero data loss.
+- **Lock Lease Hardening:** Loss of global processing lock immediately stops post metadata modifications.
+- **Webhook Transaction Protection:** Wrapped post insertion and metadata attachment in explicit SQL transactions with automatic rollback on failure, eliminating orphan draft posts.
+- **Truthful Admin Batch Progress:** Distinct counters for completed, pending, failed, and skipped items; pending items show "Queued / Pending encoding".
 
 ### Version 1.0.3
 - **Unified Manual Migration Locking:** `ajax_process_batch()` is now fully integrated with `acquire_lock(120)`, periodic heartbeat lease extension, and safe `finally` unlock, ensuring AJAX Start Migration, AJAX Check Queue, and WP-Cron run mutually exclusively without racing or overwriting post metadata.

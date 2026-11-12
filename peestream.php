@@ -3,7 +3,7 @@
  * Plugin Name: PeeStream Video Player & DooPlay Integration
  * Plugin URI: https://peestream.com
  * Description: Official PeeStream WordPress plugin with native DooPlay theme player integration, remote URL importer, auto-migrator for competitor hosters, and webhook auto-publish receiver.
- * Version: 1.0.3
+ * Version: 1.0.4
  * Author: PeeStream Team
  * Author URI: https://peestream.com
  * License: GPLv2 or later
@@ -15,7 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'PEESTREAM_VERSION', '1.0.3' );
+define( 'PEESTREAM_VERSION', '1.0.4' );
 define( 'PEESTREAM_PLUGIN_FILE', __FILE__ );
 define( 'PEESTREAM_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'PEESTREAM_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
