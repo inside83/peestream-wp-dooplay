@@ -1,0 +1,51 @@
+======================================================================
+ISOLATED CMS END-TO-END STAGING TEST RUNNER (WP/DOOPLAY & DLE)
+======================================================================
+
+>>> PART 1: DataLife Engine (DLE) End-to-End Integration Scenario <<<
+
+ [PASS] DLE RC ZIP archive exists on disk
+ [PASS] DLE RC ZIP opens cleanly
+ [PASS] peestream.xml extracted successfully
+ [PASS] engine/inc/peestream.php extracted
+ [PASS] peestream.conf.php is NOT in distribution archive
+ [PASS] Plugin Manager: 100% of manifest files exist after extraction
+ [PASS] phpinstall generated engine/data/peestream.conf.php
+ [PASS] peestream.conf.php permissions are 0644
+ [PASS] Generated webhook_secret is 48 hex characters
+ [PASS] Generated cron_secret is 48 hex characters
+ [PASS] Secrets are cryptographically distinct
+ [PASS] DLE test article #101 created with 3 competitor links
+ [PASS] All 3 servers migrated to PeeStream embeds
+ [PASS] Story embed replaced with PeeStream embed
+ [PASS] Surgical rollback restored MixDrop to original link
+ [PASS] Surgical rollback preserved Server 1 (Streamtape) as PeeStream
+ [PASS] Surgical rollback preserved Server 3 (VOE) as PeeStream
+ [PASS] Surgical rollback restored story embed to original MixDrop
+ [PASS] First webhook processed and recorded in audit log
+ [PASS] Duplicate webhook detected as already processed (replay blocked)
+ [PASS] Upgrade preserved existing webhook_secret
+ [PASS] Upgrade preserved existing cron_secret
+
+>>> PART 2: WordPress / DooPlay End-to-End Integration Scenario <<<
+
+ [PASS] WordPress RC ZIP archive exists on disk
+ [PASS] WordPress RC ZIP opens cleanly
+ [PASS] peestream.php extracted in standard plugin folder
+ [PASS] class-peestream-migrator.php extracted
+ [PASS] class-peestream-webhook.php extracted
+ [PASS] tests/ folder correctly excluded from distribution ZIP
+ [PASS] WordPress DooPlay movie created with 3 servers in repeatable_fields
+ [PASS] DooPlay Server 1 replaced with PeeStream
+ [PASS] DooPlay Server 2 replaced with PeeStream
+ [PASS] DooPlay Server 3 replaced with PeeStream
+ [PASS] Rollback restored Server 1 to Streamtape
+ [PASS] Rollback kept Server 2 (MixDrop) as PeeStream
+ [PASS] Rollback kept Server 3 (VOE) as PeeStream
+ [PASS] Rollback preserved editor added VIP server intact
+ [PASS] WordPress Webhook processed in transaction and committed
+ [PASS] WordPress Webhook duplicate delivery blocked as replay
+
+======================================================================
+ISOLATED CMS E2E RESULTS: Total: 38 | Passed: 38 | Failed: 0
+======================================================================
