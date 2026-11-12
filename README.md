@@ -2,12 +2,16 @@
 
 The official high-performance video player, automation suite, and safe competitor migrator for **PeeStream** (`peestream.com` / `peeplayer.com`). Tailored for high-traffic movie & TV show streaming portals running the **DooPlay** theme (2.5.x) or generic WordPress themes.
 
+> [!WARNING]
+> **BETA RELEASE (v1.0.4-beta.1) — NOT PRODUCTION TESTED**
+> Compatibility across WordPress and DooPlay 2.5.x is expected based on architecture review and automated harness simulations (174 tests passed). Live CMS End-to-End runtime testing on an active WordPress/DooPlay installation has **NOT BEEN RUN**. Installation is recommended exclusively on staging/testing sites. Always make a full database backup before running migrations. Please report any issues along with your CMS, theme, PHP, and database versions.
+
 ---
 
 ## Compatibility
 
-- **WordPress:** 5.8 to 6.7+
-- **PHP:** 7.4, 8.0, 8.1, 8.2, 8.3
+- **WordPress:** 5.8 to 6.7+ (Live CMS E2E: NOT RUN)
+- **PHP:** 7.4 through 8.3 (syntax lint verified on lsphp72 through lsphp83)
 - **Theme:** DooPlay 2.5.x (native `repeatable_fields` support) and all standard WordPress themes (via Universal Shortcode)
 
 ---
